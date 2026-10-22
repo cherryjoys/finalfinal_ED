@@ -2,7 +2,8 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import DateTimePicker, {
   type DateTimePickerEvent,
 } from '@react-native-community/datetimepicker';
-import { useState } from 'react';
+import { useFocusEffect } from 'expo-router';
+import { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -26,9 +27,14 @@ import {
   DEFAULT_LATE_AFTER_MINUTES,
   createEvent,
   normalizeRoster,
+  getEventsByTeacher,
+  updateEvent,
+  closeEvent,
+  type CloudEvent,
 } from '@/lib/events';
 import { buildQRPayload } from '@/lib/qr';
 import { useRole } from '@/lib/useRole';
+import { supabase } from '@/lib/supabase';
 
 function toLocalISO(date: Date) {
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -70,6 +76,14 @@ export default function TeacherScreen() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [myEvents, setMyEvents] = useState<CloudEvent[]>([]);
+  const [loadingEvents, setLoadingEvents] = useState(false);
+  const [editingEventId, setEditingEventId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editStart, setEditStart] = useState<Date | null>(null);
+  const [editEnd, setEditEnd] = useState<Date | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [closingId, setClosingId] = useState<string | null>(null);
 
   const isAndroid = Platform.OS === 'android';
   const rosterNames = normalizeRoster(roster);
@@ -117,6 +131,83 @@ export default function TeacherScreen() {
   const handleQuickEnd = (ms: number) => {
     clearFeedback();
     setEndDate(new Date(startDate.getTime() + ms));
+  };
+
+  const loadMyEvents = useCallback(async () => {
+    const { data } = await supabase.auth.getUser();
+    const user = data.user;
+    if (!user) return;
+    setLoadingEvents(true);
+    try {
+      const list = await getEventsByTeacher(user.id);
+      setMyEvents(list);
+    } finally {
+      setLoadingEvents(false);
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadMyEvents();
+    }, [loadMyEvents])
+  );
+
+  const startEdit = (ev: CloudEvent) => {
+    setEditingEventId(ev.id);
+    setEditTitle(ev.title);
+    setEditStart(ev.start_time ? new Date(ev.start_time) : null);
+    setEditEnd(ev.end_time ? new Date(ev.end_time) : null);
+    clearFeedback();
+  };
+
+  const cancelEdit = () => {
+    setEditingEventId(null);
+    setEditTitle('');
+    setEditStart(null);
+    setEditEnd(null);
+  };
+
+  const saveEdit = async () => {
+    if (!editingEventId || savingEdit) return;
+    if (!editTitle.trim()) {
+      setErrorMessage('Event title is required.');
+      return;
+    }
+    if (editStart && editEnd && editEnd.getTime() <= editStart.getTime()) {
+      setErrorMessage('End time must be after start time.');
+      return;
+    }
+    setSavingEdit(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    const { error } = await updateEvent(editingEventId, {
+      title: editTitle.trim(),
+      start_time: editStart ? editStart.toISOString() : null,
+      end_time: editEnd ? editEnd.toISOString() : null,
+    });
+    if (error) {
+      setErrorMessage(error);
+    } else {
+      setSuccessMessage('Event updated.');
+      cancelEdit();
+      await loadMyEvents();
+    }
+    setSavingEdit(false);
+  };
+
+  const handleCloseEvent = async (id: string) => {
+    if (closingId) return;
+    setClosingId(id);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    const { error } = await closeEvent(id);
+    if (error) {
+      setErrorMessage(error);
+    } else {
+      setSuccessMessage('Event closed.');
+      await loadMyEvents();
+    }
+    setClosingId(null);
   };
 
   const handleCreateEvent = async () => {
@@ -369,6 +460,83 @@ export default function TeacherScreen() {
             ) : null}
           </View>
         ) : null}
+
+        <View style={styles.resultCard}>
+          <View style={styles.resultHeader}>
+            <IconTile name={APP_ICONS.calendar} size={36} style={styles.resultHeaderIcon} />
+            <Text style={styles.resultTitle}>My events</Text>
+          </View>
+
+          {loadingEvents ? (
+            <ActivityIndicator color={COLORS.primary} />
+          ) : myEvents.length === 0 ? (
+            <Text style={styles.resultText}>No events created yet.</Text>
+          ) : (
+            <View>
+              {myEvents.map((ev) => (
+                <View key={ev.id} style={styles.eventItem}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.eventTitle}>{ev.title}</Text>
+                    <Text style={styles.eventCode}>{ev.event_code}</Text>
+                    {ev.start_time ? (
+                      <Text style={styles.fieldHint}>
+                        Starts {new Date(ev.start_time).toLocaleString()}
+                      </Text>
+                    ) : null}
+                    {ev.end_time ? (
+                      <Text style={styles.fieldHint}>
+                        Ends {new Date(ev.end_time).toLocaleString()} (Closed)
+                      </Text>
+                    ) : (
+                      <Text style={styles.fieldHint}>Status: Open</Text>
+                    )}
+                  </View>
+
+                  {editingEventId === ev.id ? (
+                    <View style={{ marginTop: 10 }}>
+                      <TextInput
+                        value={editTitle}
+                        onChangeText={setEditTitle}
+                        placeholder="Event title"
+                        style={[styles.inputShell, { paddingLeft: 12 }]}
+                      />
+                      <View style={{ flexDirection: 'row', marginTop: 8, gap: 8 }}>
+                        <AppButton
+                          compact
+                          title="Save"
+                          icon="checkmark-outline"
+                          onPress={saveEdit}
+                          loading={savingEdit}
+                        />
+                        <AppButton
+                          compact
+                          variant="secondary"
+                          title="Cancel"
+                          icon="close-outline"
+                          onPress={cancelEdit}
+                        />
+                      </View>
+                    </View>
+                  ) : (
+                    <View style={{ flexDirection: 'row', gap: 6, marginTop: 8 }}>
+                      <AppButton compact title="Edit" icon="create-outline" onPress={() => startEdit(ev)} />
+                      {!ev.end_time && (
+                        <AppButton
+                          compact
+                          variant="danger"
+                          title="Close"
+                          icon="lock-closed-outline"
+                          loading={closingId === ev.id}
+                          onPress={() => void handleCloseEvent(ev.id)}
+                        />
+                      )}
+                    </View>
+                  )}
+                </View>
+              ))}
+            </View>
+          )}
+        </View>
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -609,6 +777,25 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     textAlign: 'center',
     marginTop: 15,
+  },
+  eventTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: COLORS.textPrimary,
+  },
+  eventCode: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: COLORS.primary,
+    marginTop: 2,
+  },
+  eventItem: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 12,
+    marginTop: 10,
   },
   codeBadge: {
     alignSelf: 'center',

@@ -5,9 +5,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { COLORS } from '@/constants/colors';
 import { APP_ICONS } from '@/constants/icons';
+import { useRole } from '@/lib/useRole';
 
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
+  const { role } = useRole();
+  const isAdmin = role === 'admin';
 
   return (
     <Tabs
@@ -79,6 +82,22 @@ export default function TabLayout() {
           ),
         }}
       />
+      {isAdmin && (
+        <Tabs.Screen
+          name="admin"
+          options={{
+            title: 'Admin',
+            tabBarAccessibilityLabel: 'Admin dashboard',
+            tabBarIcon: ({ color, focused }) => (
+              <Ionicons
+                name={focused ? 'shield' : 'shield-outline'}
+                color={color}
+                size={22}
+              />
+            ),
+          }}
+        />
+      )}
       <Tabs.Screen
         name="profile"
         options={{

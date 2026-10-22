@@ -91,6 +91,7 @@ export default function LoginScreen() {
                 placeholder="Enter your password"
                 placeholderTextColor={COLORS.textSecondary}
                 secureTextEntry={!showPassword}
+                autoComplete="password"
                 textContentType="password"
                 editable={!loading}
               />
@@ -99,13 +100,25 @@ export default function LoginScreen() {
                 accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
                 hitSlop={10}
                 onPress={() => setShowPassword((current) => !current)}
-                style={styles.passwordToggle}
+                style={({ pressed }) => [styles.passwordToggle, pressed && { opacity: 0.7 }]}
               >
                 <Ionicons
                   name={showPassword ? 'eye-off-outline' : 'eye-outline'}
                   size={20}
                   color={COLORS.textSecondary}
                 />
+              </Pressable>
+            </View>
+
+            <View style={styles.forgotRow}>
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => router.push('/forgot-password')}
+                disabled={loading}
+                hitSlop={6}
+                style={styles.forgotBtn}
+              >
+                <Text style={styles.forgotText}>Forgot password?</Text>
               </Pressable>
             </View>
 
@@ -192,7 +205,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     paddingLeft: 15,
-    paddingRight: 8,
+    paddingRight: 4,
   },
   input: {
     flex: 1,
@@ -205,12 +218,26 @@ const styles = StyleSheet.create({
   },
   passwordToggle: {
     width: 44,
-    height: 48,
+    height: 44,
     alignItems: 'center',
     justifyContent: 'center',
+    borderRadius: 12,
+  },
+  forgotRow: {
+    alignItems: 'flex-end',
+    marginTop: 8,
+  },
+  forgotBtn: {
+    paddingVertical: 4,
+    paddingHorizontal: 2,
+  },
+  forgotText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: COLORS.primary,
   },
   submitButton: {
-    marginTop: 22,
+    marginTop: 18,
   },
   errorBanner: {
     flexDirection: 'row',

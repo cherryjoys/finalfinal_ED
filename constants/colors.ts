@@ -1,43 +1,47 @@
 export const COLORS = {
-  // Brand — lavender / violet
-  primary: '#5B3FBF',
-  primaryDark: '#3E2A85',
-  primaryLight: '#EDE7FE',
+  // Brand — modern violet + sky
+  primary: '#8B5CF6',
+  primaryDark: '#5B21B6',
+  primaryLight: '#F5F0FF',
 
-  accent: '#7C5CD6',
-  accentSoft: '#F4F0FE',
+  accent: '#38BDF8',
+  accentSoft: '#F0F9FF',
 
-  background: '#F7F5FE',
+  // Backgrounds
+  background: '#F6F5FF',
   card: '#FFFFFF',
+  surface: '#FAF8FF',
 
-  textPrimary: '#2A1B54',
-  textSecondary: '#6E6395',
+  // Text
+  textPrimary: '#1F1635',
+  textSecondary: '#7F7CA3',
   textOnPrimary: '#FFFFFF',
 
-  surface: '#F3EFFE',
-  border: '#E3DAF8',
-  shadow: '#4B32A0',
+  // Borders & shadows
+  border: '#EEE7FF',
+  shadow: 'rgba(91, 33, 182, 0.12)',
 
+  // QR
   qrBackground: '#FFFFFF',
-  qrForeground: '#3B2478',
+  qrForeground: '#4C1D95',
 
   // Attendance states
-  present: '#1F8A63',
-  presentSoft: '#DEF3EA',
-  late: '#B26A12',
-  lateSoft: '#FDF1DC',
-  absent: '#C2435C',
-  absentSoft: '#FBE8EC',
+  present: '#16A34A',
+  presentSoft: '#F0FDF4',
+  late: '#F59E0B',
+  lateSoft: '#FFF7ED',
+  absent: '#EF4444',
+  absentSoft: '#FEF2F2',
 
   // Semantic aliases
-  success: '#1F8A63',
-  successSoft: '#DEF3EA',
-  warning: '#B26A12',
-  warningSoft: '#FDF1DC',
-  danger: '#C2435C',
-  dangerSoft: '#FBE8EC',
+  success: '#16A34A',
+  successSoft: '#F0FDF4',
+  warning: '#F59E0B',
+  warningSoft: '#FFF7ED',
+  danger: '#EF4444',
+  dangerSoft: '#FEF2F2',
 
-  overlay: 'rgba(42, 27, 84, 0.82)',
+  overlay: 'rgba(31, 22, 53, 0.88)',
   white: '#FFFFFF',
 } as const;
 

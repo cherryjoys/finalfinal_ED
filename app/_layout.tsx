@@ -24,7 +24,11 @@ function RootNavigator() {
     );
   }
 
-  const inAuthGroup = segments[0] === 'login' || segments[0] === 'register';
+  const inAuthGroup =
+    segments[0] === 'login' ||
+    segments[0] === 'register' ||
+    segments[0] === 'forgot-password' ||
+    segments[0] === 'update-password';
 
   return (
     <>
@@ -36,11 +40,13 @@ function RootNavigator() {
       >
         <Stack.Screen name="login" />
         <Stack.Screen name="register" />
+        <Stack.Screen name="forgot-password" />
+        <Stack.Screen name="update-password" />
         <Stack.Screen name="(tabs)" />
       </Stack>
 
       {!session && !inAuthGroup && <Redirect href="/login" />}
-      {session && inAuthGroup && <Redirect href="/" />}
+      {session && inAuthGroup && segments[0] !== 'update-password' && <Redirect href="/" />}
     </>
   );
 }

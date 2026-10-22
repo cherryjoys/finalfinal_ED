@@ -71,7 +71,7 @@ export default function AppButton({
         ) : (
           <Ionicons
             name={icon}
-            size={compact ? 18 : 21}
+            size={compact ? 18 : 20}
             color={
               isPrimary
                 ? COLORS.textOnPrimary
@@ -85,12 +85,15 @@ export default function AppButton({
         <Text
           style={[
             styles.label,
+            compact && styles.compactLabel,
             isPrimary ? styles.primaryLabel : styles.secondaryLabel,
             buttonVariant === 'danger' && styles.dangerLabel,
           ]}
         >
           {title}
         </Text>
+
+        {isPrimary && <View style={styles.primaryGlow} pointerEvents="none" />}
       </Pressable>
     </View>
   );
@@ -99,7 +102,7 @@ export default function AppButton({
 const styles = StyleSheet.create({
   buttonOuter: {
     width: '100%',
-    marginBottom: 14,
+    marginBottom: 12,
   },
   compactOuter: {
     width: 'auto',
@@ -108,27 +111,39 @@ const styles = StyleSheet.create({
   },
   buttonInner: {
     minHeight: 54,
-    borderRadius: 16,
+    borderRadius: 18,
     borderWidth: 1,
     paddingVertical: 14,
-    paddingHorizontal: 20,
+    paddingHorizontal: 18,
     alignItems: 'center',
     justifyContent: 'center',
     flexDirection: 'row',
+    position: 'relative',
+    overflow: 'hidden',
   },
   compactInner: {
     minHeight: 44,
-    borderRadius: 13,
+    borderRadius: 14,
     paddingVertical: 10,
-    paddingHorizontal: 15,
+    paddingHorizontal: 14,
   },
   primaryFill: {
     backgroundColor: COLORS.primary,
     borderColor: COLORS.primary,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.16,
+    shadowRadius: 14,
+    elevation: 3,
   },
   secondaryFill: {
     backgroundColor: COLORS.surface,
     borderColor: COLORS.border,
+    shadowColor: COLORS.shadow,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 1,
   },
   ghostFill: {
     backgroundColor: 'transparent',
@@ -136,24 +151,34 @@ const styles = StyleSheet.create({
   },
   dangerFill: {
     backgroundColor: COLORS.dangerSoft,
-    borderColor: COLORS.dangerSoft,
+    borderColor: 'rgba(239, 68, 68, 0.16)',
+    shadowColor: COLORS.danger,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 0,
   },
   pressed: {
-    opacity: 0.82,
-    transform: [{ scale: 0.985 }],
+    opacity: 0.92,
+    transform: [{ scale: 0.992 }],
   },
   disabled: {
-    opacity: 0.75,
+    opacity: 0.6,
   },
   icon: {
-    paddingRight: 10,
+    paddingRight: 8,
   },
   loadingIndicator: {
-    marginRight: 10,
+    marginRight: 8,
   },
   label: {
-    fontSize: 16,
-    fontWeight: '700',
+    fontSize: 15,
+    fontWeight: '800',
+    letterSpacing: -0.15,
+  },
+  compactLabel: {
+    fontSize: 13.5,
+    letterSpacing: -0.1,
   },
   primaryLabel: {
     color: COLORS.textOnPrimary,
@@ -163,5 +188,14 @@ const styles = StyleSheet.create({
   },
   dangerLabel: {
     color: COLORS.danger,
+  },
+  primaryGlow: {
+    position: 'absolute',
+    top: -20,
+    left: -20,
+    right: -20,
+    height: 40,
+    borderRadius: 40,
+    backgroundColor: 'rgba(255,255,255,0.25)',
   },
 });

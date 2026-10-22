@@ -112,6 +112,11 @@ export async function registerAttendance(
   }
   const payload = parsed.payload;
 
+  const active = await isAccountActive(studentId);
+  if (!active) {
+    return { success: false, message: 'This account has been deactivated.' };
+  }
+
   const now = Date.now();
   const start = payload.start ? new Date(payload.start).getTime() : null;
   const end = payload.end ? new Date(payload.end).getTime() : null;
@@ -262,7 +267,7 @@ export async function getTeacherEventAttendance(
       matchIds.has(r.event_id)
     );
 
-    return buildEventDetail(event, matchIds, scans, rosterRows, nameById);
+    return buildEventDetail(event, scans, rosterRows, nameById);
   });
 }
 
@@ -383,7 +388,6 @@ function earliestScanByStudent(rows: any[]): Map<string, any> {
 
 function buildEventDetail(
   event: any,
-  matchIds: Set<string>,
   scans: Map<string, any>,
   rosterRows: any[],
   nameById: Map<string, string | null>
@@ -504,3 +508,163 @@ function addToSet(
   map.set(key, set);
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// STUDENT VIEWS
+// ---------------------------------------------------------------------------
+
+export type StudentEventCheckIn = {
+  status: ScannedStatus;
+  scannedAt: string;
+};
+
+/**
+ * The student's own check-ins keyed by event id. Powers the "Available events"
+ * screen so a student can see at a glance which events they already joined.
+ */
+export async function getStudentCheckIns(
+  studentId: string
+): Promise<Map<string, StudentEventCheckIn>> {
+  const map = new Map<string, StudentEventCheckIn>();
+
+  const { data, error } = await supabase
+    .from('attendance')
+    .select('event_id, scanned_at, status')
+    .eq('student_id', studentId);
+
+  if (error || !data) return map;
+
+  for (const row of data as any[]) {
+    map.set(row.event_id, {
+      status: row.status === 'late' ? 'late' : 'present',
+      scannedAt: row.scanned_at,
+    });
+  }
+  return map;
+}
+
+/**
+ * The events the student is expected to attend. A roster row only carries a
+ * student_id when the teacher's name matched an account exactly, so this is a
+ * best-effort list rather than a guarantee.
+ */
+export async function getStudentExpectedEventIds(
+  studentId: string
+): Promise<Set<string>> {
+  const ids = new Set<string>();
+
+  const { data, error } = await supabase
+    .from('event_roster')
+    .select('event_id')
+    .eq('student_id', studentId);
+
+  if (error || !data) return ids;
+
+  for (const row of data as any[]) {
+    ids.add(row.event_id);
+  }
+  return ids;
+}
+
+/** True unless an administrator has deactivated the account. */
+export async function isAccountActive(userId: string): Promise<boolean> {
+  const { data } = await supabase
+    .from('profiles')
+    .select('is_active')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (!data) return true;
+  return (data as any).is_active !== false;
+}
+
+// ---------------------------------------------------------------------------
+// TEACHER SUMMARIES
+// ---------------------------------------------------------------------------
+
+export type TeacherStudentStat = {
+  key: string;
+  studentId: string | null;
+  name: string;
+  present: number;
+  late: number;
+  absent: number;
+  total: number;
+  rate: number;
+};
+
+export type TeacherAttendanceReport = {
+  eventCount: number;
+  presentCount: number;
+  lateCount: number;
+  absentCount: number;
+  checkedInCount: number;
+  expectedCount: number;
+  attendanceRate: number;
+  students: TeacherStudentStat[];
+};
+
+/**
+ * The roll-up of every event a teacher owns: the headline totals plus a
+ * per-student breakdown used for the attendance summary.
+ */
+export async function getTeacherAttendanceReport(
+  teacherId: string
+): Promise<TeacherAttendanceReport> {
+  const events = await getTeacherEventAttendance(teacherId);
+
+  const stats = new Map<string, TeacherStudentStat>();
+  let presentCount = 0;
+  let lateCount = 0;
+  let absentCount = 0;
+
+  for (const event of events) {
+    presentCount += event.presentCount;
+    lateCount += event.lateCount;
+    absentCount += event.absentCount;
+
+    for (const entry of event.entries) {
+      const key = entry.studentId ?? entry.studentName.trim().toLowerCase();
+      const existing = stats.get(key);
+      const stat: TeacherStudentStat = existing ?? {
+        key,
+        studentId: entry.studentId,
+        name: entry.studentName,
+        present: 0,
+        late: 0,
+        absent: 0,
+        total: 0,
+        rate: 0,
+      };
+
+      if (entry.status === 'late') stat.late += 1;
+      else if (entry.status === 'absent') stat.absent += 1;
+      else stat.present += 1;
+      stat.total += 1;
+
+      stats.set(key, stat);
+    }
+  }
+
+  const students = Array.from(stats.values())
+    .map((stat) => ({
+      ...stat,
+      rate: stat.total > 0 ? (stat.present + stat.late) / stat.total : 0,
+    }))
+    .sort((a, b) => b.rate - a.rate || a.name.localeCompare(b.name));
+
+  const expectedCount = presentCount + lateCount + absentCount;
+
+  return {
+    eventCount: events.length,
+    presentCount,
+    lateCount,
+    absentCount,
+    checkedInCount: presentCount + lateCount,
+    expectedCount,
+    attendanceRate:
+      expectedCount > 0 ? (presentCount + lateCount) / expectedCount : 0,
+    students,
+  };
+}
+

@@ -23,11 +23,13 @@ import { APP_ICONS, STATUS_META, STATUS_ORDER, type StatusKey } from '@/constant
 import { useAuth } from '@/lib/auth';
 import {
   getAttendanceHistory,
+  getTeacherAttendanceReport,
   getTeacherEventAttendance,
   getTeacherEventSummary,
   type AttendanceEntry,
   type AttendanceRecord,
   type ScannedStatus,
+  type TeacherAttendanceReport,
   type TeacherEventAttendance,
   type TeacherEventSummary,
 } from '@/lib/attendance';
@@ -38,6 +40,8 @@ export default function HistoryScreen() {
   const { role, loading: roleLoading } = useRole();
   const [studentRecords, setStudentRecords] = useState<AttendanceRecord[]>([]);
   const [teacherSummary, setTeacherSummary] = useState<TeacherEventSummary[]>([]);
+  const [teacherReport, setTeacherReport] = useState<TeacherAttendanceReport | null>(null);
+  const [showSummary, setShowSummary] = useState(true);
   const [expandedDetail, setExpandedDetail] =
     useState<TeacherEventAttendance | null>(null);
   const [expandingEventId, setExpandingEventId] = useState<string | null>(null);
@@ -61,18 +65,24 @@ export default function HistoryScreen() {
 
     try {
       if (role === 'teacher') {
-        const summary = await getTeacherEventSummary(user.id);
+        const [summary, report] = await Promise.all([
+          getTeacherEventSummary(user.id),
+          getTeacherAttendanceReport(user.id),
+        ]);
         setTeacherSummary(summary);
+        setTeacherReport(report);
         setStudentRecords([]);
         setExpandedDetail(null);
       } else if (role === 'student') {
         const records = await getAttendanceHistory(user.id);
         setStudentRecords(records);
         setTeacherSummary([]);
+        setTeacherReport(null);
         setExpandedDetail(null);
       } else {
         setStudentRecords([]);
         setTeacherSummary([]);
+        setTeacherReport(null);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load history.');
@@ -131,6 +141,13 @@ export default function HistoryScreen() {
         <View style={styles.screen}>
           <Header title={screenTitle} compact />
           {error ? <ErrorBanner message={error} onRetry={() => void load()} /> : null}
+          {teacherReport ? (
+            <TeacherSummaryCard
+              report={teacherReport}
+              expanded={showSummary}
+              onToggle={() => setShowSummary((value) => !value)}
+            />
+          ) : null}
           {teacherSummary.length === 0 ? (
             <EmptyState
               icon={APP_ICONS.calendar}
@@ -298,6 +315,83 @@ function StatusTally({ present, late, absent, hideEmpty = true, style }: TallyPr
           <Text style={styles.tallyLabel}>{STATUS_META[key].label}</Text>
         </View>
       ))}
+    </View>
+  );
+}
+
+function TeacherSummaryCard({
+  report,
+  expanded,
+  onToggle,
+}: {
+  report: TeacherAttendanceReport;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const visibleStudents = report.students.slice(0, 8);
+  const hiddenCount = report.students.length - visibleStudents.length;
+
+  return (
+    <View style={styles.summaryCard}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={
+          expanded ? 'Hide attendance summary' : 'Show attendance summary'
+        }
+        accessibilityState={{ expanded }}
+        onPress={onToggle}
+        style={styles.summaryHeader}
+      >
+        <IconTile name="stats-chart-outline" size={34} />
+        <View style={styles.summaryHeaderCopy}>
+          <Text style={styles.summaryTitle}>Attendance summary</Text>
+          <Text style={styles.summarySubtitle}>
+            {report.eventCount} {report.eventCount === 1 ? 'event' : 'events'} -{' '}
+            {Math.round(report.attendanceRate * 100)}% attendance
+          </Text>
+        </View>
+        <Ionicons
+          name={expanded ? 'chevron-up' : 'chevron-down'}
+          size={19}
+          color={COLORS.textSecondary}
+        />
+      </Pressable>
+
+      {expanded ? (
+        <>
+          <StatusTally
+            present={report.presentCount}
+            late={report.lateCount}
+            absent={report.absentCount}
+            hideEmpty={false}
+            style={styles.metaTally}
+          />
+
+          {visibleStudents.length === 0 ? (
+            <Text style={styles.summaryEmpty}>No students have been recorded yet.</Text>
+          ) : (
+            visibleStudents.map((student) => (
+              <View key={student.key} style={styles.summaryStudentRow}>
+                <View style={styles.summaryStudentCopy}>
+                  <Text style={styles.summaryStudentName} numberOfLines={1}>
+                    {student.name}
+                  </Text>
+                  <Text style={styles.summaryStudentMeta}>
+                    {student.present} present - {student.late} late - {student.absent} absent
+                  </Text>
+                </View>
+                <Text style={styles.summaryStudentRate}>
+                  {Math.round(student.rate * 100)}%
+                </Text>
+              </View>
+            ))
+          )}
+
+          {hiddenCount > 0 ? (
+            <Text style={styles.summaryEmpty}>+{hiddenCount} more students</Text>
+          ) : null}
+        </>
+      ) : null}
     </View>
   );
 }
@@ -709,5 +803,63 @@ const styles = StyleSheet.create({
   },
   recordChip: {
     marginLeft: 4,
+  },
+  summaryCard: {
+    backgroundColor: COLORS.card,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 16,
+    marginTop: 16,
+  },
+  summaryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  summaryHeaderCopy: {
+    flex: 1,
+    paddingHorizontal: 11,
+  },
+  summaryTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: COLORS.textPrimary,
+  },
+  summarySubtitle: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    marginTop: 2,
+  },
+  summaryEmpty: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    marginTop: 10,
+  },
+  summaryStudentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    marginTop: 6,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+  },
+  summaryStudentCopy: {
+    flex: 1,
+    paddingRight: 10,
+  },
+  summaryStudentName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.textPrimary,
+  },
+  summaryStudentMeta: {
+    fontSize: 11,
+    color: COLORS.textSecondary,
+    marginTop: 2,
+  },
+  summaryStudentRate: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: COLORS.primary,
   },
 });

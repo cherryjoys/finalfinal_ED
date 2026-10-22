@@ -159,7 +159,7 @@ export default function RegisterScreen() {
                     accessibilityLabel={showPassword ? 'Hide password' : 'Show password'}
                     hitSlop={10}
                     onPress={() => setShowPassword((current) => !current)}
-                    style={styles.passwordToggle}
+                    style={({ pressed }) => [styles.passwordToggle, pressed && { opacity: 0.7 }]}
                   >
                     <Ionicons
                       name={showPassword ? 'eye-off-outline' : 'eye-outline'}
@@ -190,7 +190,7 @@ export default function RegisterScreen() {
                     }
                     hitSlop={10}
                     onPress={() => setShowConfirmPassword((current) => !current)}
-                    style={styles.passwordToggle}
+                    style={({ pressed }) => [styles.passwordToggle, pressed && { opacity: 0.7 }]}
                   >
                     <Ionicons
                       name={showConfirmPassword ? 'eye-off-outline' : 'eye-outline'}
@@ -217,6 +217,9 @@ export default function RegisterScreen() {
                     onPress={() => setRole('teacher')}
                   />
                 </View>
+                <Text style={styles.roleHint}>
+                  Administrator accounts are created by an existing administrator.
+                </Text>
 
                 {error ? (
                   <View accessibilityRole="alert" style={styles.errorBanner}>
@@ -344,7 +347,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     paddingLeft: 15,
-    paddingRight: 8,
+    paddingRight: 4,
   },
   input: {
     flex: 1,
@@ -357,12 +360,15 @@ const styles = StyleSheet.create({
   },
   passwordToggle: {
     width: 44,
-    height: 48,
+    height: 44,
     alignItems: 'center',
     justifyContent: 'center',
+    borderRadius: 12,
   },
   roleRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
   },
   roleChip: {
     flex: 1,
@@ -374,7 +380,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     borderRadius: 15,
     backgroundColor: COLORS.surface,
-    marginRight: 8,
+    marginRight: 6,
   },
   roleChipActive: {
     backgroundColor: COLORS.primaryLight,
@@ -395,6 +401,12 @@ const styles = StyleSheet.create({
   },
   roleChipTextActive: {
     color: COLORS.primaryDark,
+  },
+  roleHint: {
+    fontSize: 12,
+    lineHeight: 17,
+    color: COLORS.textSecondary,
+    marginTop: 10,
   },
   errorBanner: {
     flexDirection: 'row',

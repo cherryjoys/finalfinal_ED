@@ -21,7 +21,13 @@ export function useRole(): { role: Role | null; loading: boolean } {
       }
       getProfile(user.id).then((profile) => {
         if (!active) return;
-        setRole(profile?.role ?? null);
+        const metaRole = user.user_metadata?.role as string | undefined;
+        const resolved =
+          (profile?.role as Role | undefined) ??
+          (metaRole === 'admin' || metaRole === 'teacher' || metaRole === 'student'
+            ? (metaRole as Role)
+            : null);
+        setRole(resolved);
         setLoading(false);
       });
       return () => {

@@ -27,6 +27,8 @@ export type CloudEvent = {
   created_at: string;
 };
 
+export type EventPhase = 'upcoming' | 'ongoing' | 'ended' | 'unscheduled';
+
 /** Coerces free input into a clean, de-duplicated, ordered list of names. */
 export function normalizeRoster(raw: string | string[] | undefined): string[] {
   const parts = Array.isArray(raw) ? raw : (raw ?? '').split(/[,\n]/);
@@ -174,4 +176,128 @@ export async function getEventByCode(
   }
 
   return data as CloudEvent;
+}
+
+export async function getEventById(id: string): Promise<CloudEvent | null> {
+  const { data, error } = await supabase
+    .from('events')
+    .select('*')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (error || !data) {
+    return null;
+  }
+
+  return data as CloudEvent;
+}
+
+/**
+ * Every event on the system, soonest first. Used by the student "Events"
+ * screen so a student can see what is coming up before scanning.
+ */
+export async function getAvailableEvents(): Promise<CloudEvent[]> {
+  const { data, error } = await supabase
+    .from('events')
+    .select('*')
+    .order('start_time', { ascending: true, nullsFirst: false });
+
+  if (error || !data) {
+    return [];
+  }
+
+  return (data as CloudEvent[]).sort(sortBySchedule);
+}
+
+/** Everything on the system regardless of owner. Administrators only. */
+export async function listAllEvents(): Promise<CloudEvent[]> {
+  const { data, error } = await supabase
+    .from('events')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (error || !data) {
+    return [];
+  }
+
+  return data as CloudEvent[];
+}
+
+/**
+ * Removes an event. Attendance rows and roster rows for that event cascade
+ * away with it. Administrators only.
+ */
+export async function deleteEvent(eventId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase.from('events').delete().eq('id', eventId);
+  return { error: error?.message ?? null };
+}
+
+/**
+ * Upcoming and running events first (soonest first), then finished ones
+ * (most recent first).
+ */
+export function sortBySchedule(a: CloudEvent, b: CloudEvent, now = Date.now()): number {
+  const rank: Record<EventPhase, number> = {
+    ongoing: 0,
+    upcoming: 1,
+    unscheduled: 2,
+    ended: 3,
+  };
+
+  const aRank = rank[getEventPhase(a, now)];
+  const bRank = rank[getEventPhase(b, now)];
+  if (aRank !== bRank) return aRank - bRank;
+
+  const aStart = a.start_time ? new Date(a.start_time).getTime() : 0;
+  const bStart = b.start_time ? new Date(b.start_time).getTime() : 0;
+
+  // Running and upcoming read best soonest-first; finished events read best
+  // most-recent-first.
+  return aRank === 3 ? bStart - aStart : aStart - bStart;
+}
+
+/**
+ * Where an event sits in its life: not started yet, running right now, over,
+ * or never scheduled.
+ */
+export function getEventPhase(
+  event: { start_time: string | null; end_time: string | null },
+  now = Date.now()
+): EventPhase {
+  const start = event.start_time ? new Date(event.start_time).getTime() : null;
+  const end = event.end_time ? new Date(event.end_time).getTime() : null;
+
+  const validStart = start !== null && Number.isFinite(start);
+  const validEnd = end !== null && Number.isFinite(end);
+
+  if (validStart && start! > now) return 'upcoming';
+  if (validEnd && end! < now) return 'ended';
+  if (validStart) return 'ongoing';
+  return 'unscheduled';
+}
+
+export async function updateEvent(
+  eventId: string,
+  updates: {
+    title?: string;
+    start_time?: string | null;
+    end_time?: string | null;
+    late_after_minutes?: number;
+  }
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('events')
+    .update(updates)
+    .eq('id', eventId);
+
+  return { error: error?.message ?? null };
+}
+
+export async function closeEvent(eventId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('events')
+    .update({ end_time: new Date().toISOString() })
+    .eq('id', eventId);
+
+  return { error: error?.message ?? null };
 }
