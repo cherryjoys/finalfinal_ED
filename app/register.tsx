@@ -218,7 +218,8 @@ export default function RegisterScreen() {
                   />
                 </View>
                 <Text style={styles.roleHint}>
-                  Administrator accounts are created by an existing administrator.
+                  The single administrator account is created in advance and
+                  cannot be registered here.
                 </Text>
 
                 {error ? (

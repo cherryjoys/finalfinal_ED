@@ -1,204 +1,328 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
+import DateTimePicker, {
+  type DateTimePickerEvent,
+} from '@react-native-community/datetimepicker';
 import { useFocusEffect } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Platform,
   Pressable,
   ScrollView,
   Share,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import QRCode from 'react-native-qrcode-svg';
 
-import AppButton from '@/components/AppButton';
-import Header from '@/components/Header';
-import IconTile from '@/components/IconTile';
-import StatusChip from '@/components/StatusChip';
-import { COLORS } from '@/constants/colors';
-import { APP_ICONS } from '@/constants/icons';
+import GradientScreen from '@/components/GradientScreen';
+import { COLORS, STATUS, TINTS } from '@/constants/colors';
+import { PRESSED, RADIUS, SHADOWS, SPACING, TEXT } from '@/constants/theme';
 import {
-  deleteAttendanceRecord,
+  deleteAttendance,
+  deleteEvent,
+  getAdminUsers,
+  getAllEvents,
+  getOverallAttendance,
   getSystemReport,
   listAuditLog,
-  listEventRoster,
-  listUsers,
   logAdminAction,
-  markAttendancePresent,
   reportToCsv,
-  setAttendanceStatus,
   setUserActive,
-  setUserRole,
+  updateAttendanceStatus,
+  updateUserRole,
   type AdminAttendanceRecord,
-  type AdminEventSummary,
-  type AdminRosterEntry,
-  type AdminRole,
-  type AdminStudentStat,
   type AdminUser,
   type AuditEntry,
   type SystemReport,
 } from '@/lib/admin';
 import { useAuth } from '@/lib/auth';
-import { deleteEvent } from '@/lib/events';
+import {
+  createEvent,
+  updateEvent,
+  type CloudEvent,
+  type EventStatus,
+} from '@/lib/events';
+import type { AttendanceStatus } from '@/lib/attendance';
+import type { Role } from '@/lib/profiles';
+import { buildQRPayload } from '@/lib/qr';
 import { useRole } from '@/lib/useRole';
 
-const ROLES: AdminRole[] = ['student', 'teacher', 'admin'];
-const MAX_VISIBLE_ROWS = 50;
+const GLASS = 'rgba(255, 255, 255, 0.72)';
+const GLASS_SOFT = 'rgba(255, 255, 255, 0.38)';
+const GLASS_BORDER = 'rgba(255, 255, 255, 0.65)';
+const ON_GRADIENT = 'rgba(255, 255, 255, 0.82)';
 
-export default function AdminScreen() {
+type AdminTab = 'overview' | 'users' | 'events' | 'attendance' | 'reports';
+
+const TABS: { key: AdminTab; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
+  { key: 'overview', label: 'Overview', icon: 'stats-chart-outline' },
+  { key: 'users', label: 'Users', icon: 'people-outline' },
+  { key: 'events', label: 'Events', icon: 'calendar-outline' },
+  { key: 'attendance', label: 'Attendance', icon: 'checkmark-done-outline' },
+  { key: 'reports', label: 'Reports', icon: 'document-text-outline' },
+];
+
+const ROLE_OPTIONS: Role[] = ['student', 'teacher'];
+const ROLE_LABELS: Record<Role, string> = {
+  student: 'Student',
+  teacher: 'Teacher',
+  admin: 'Admin',
+};
+
+const ATTENDANCE_OPTIONS: AttendanceStatus[] = ['present', 'late', 'absent'];
+
+function AdminScreenInner() {
   const { user } = useAuth();
   const { role, loading: roleLoading } = useRole();
+  const [tab, setTab] = useState<AdminTab>('overview');
   const [users, setUsers] = useState<AdminUser[]>([]);
-  const [events, setEvents] = useState<AdminEventSummary[]>([]);
+  const [events, setEvents] = useState<CloudEvent[]>([]);
   const [records, setRecords] = useState<AdminAttendanceRecord[]>([]);
-  const [students, setStudents] = useState<AdminStudentStat[]>([]);
   const [report, setReport] = useState<SystemReport | null>(null);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
-  const [roster, setRoster] = useState<AdminRosterEntry[]>([]);
-  const [rosterEventId, setRosterEventId] = useState<string | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-
-  const load = useCallback(
-    async (silent = false) => {
-      if (roleLoading) {
-        if (!silent) setLoading(true);
-        return;
-      }
-      if (!user || role !== 'admin') {
-        setLoading(false);
-        return;
-      }
-      if (!silent) setLoading(true);
-      setError(null);
-
-      try {
-        const [userList, systemReport, auditLog] = await Promise.all([
-          listUsers(),
-          getSystemReport(),
-          listAuditLog(25),
-        ]);
-        setUsers(userList);
-        setReport(systemReport);
-        setEvents(systemReport.events);
-        setRecords(systemReport.records);
-        setStudents(systemReport.students);
-        setAudit(auditLog);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Could not load admin data.');
-      } finally {
-        setLoading(false);
-      }
-    },
-    [user, role, roleLoading]
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [creatingEvent, setCreatingEvent] = useState(false);
+  const [qrPayload, setQrPayload] = useState<string | null>(null);
+  const [editingEvent, setEditingEvent] = useState<CloudEvent | null>(null);
+  const [draftTitle, setDraftTitle] = useState('');
+  const [draftCode, setDraftCode] = useState('');
+  const [draftVenue, setDraftVenue] = useState('');
+  const [draftDescription, setDraftDescription] = useState('');
+  const [draftStart, setDraftStart] = useState(() => new Date());
+  const [draftEnd, setDraftEnd] = useState(
+    () => new Date(Date.now() + 60 * 60 * 1000)
   );
+  const [pickerTarget, setPickerTarget] = useState<'start' | 'end' | null>(
+    null
+  );
+  const [pickerPart, setPickerPart] = useState<'date' | 'time'>('date');
+
+  const loadAll = useCallback(async () => {
+    if (role !== 'admin') {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    const [nextUsers, nextEvents, nextRecords] = await Promise.all([
+      getAdminUsers(),
+      getAllEvents(),
+      getOverallAttendance(),
+    ]);
+    setUsers(nextUsers);
+    setEvents(nextEvents);
+    setRecords(nextRecords);
+    setLoading(false);
+  }, [role]);
 
   useFocusEffect(
     useCallback(() => {
-      void load();
-    }, [load])
+      loadAll();
+    }, [loadAll])
   );
 
-  /**
-   * Runs one administrator action, records it in the audit log and refreshes
-   * the dashboard. `busyKey` keeps the rest of the screen tappable while a
-   * single row is being written.
-   */
-  const runAction = useCallback(
-    async (
-      key: string,
-      action: () => Promise<{ error: string | null }>,
-      successMessage: string
-    ) => {
-      setBusyKey(key);
-      setError(null);
-      setNotice(null);
-      try {
-        const result = await action();
-        if (result.error) {
-          setError(result.error);
-        } else {
-          setNotice(successMessage);
-          await load(true);
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'The action could not be completed.');
-      } finally {
-        setBusyKey(null);
-      }
-    },
-    [load]
-  );
+  const loadReport = useCallback(async () => {
+    if (role !== 'admin') return;
 
-  const handleRoleChange = (account: AdminUser, nextRole: AdminRole) => {
-    if (account.role === nextRole) return;
-    void runAction(
-      `role-${account.id}`,
-      async () => {
-        const result = await setUserRole(account.id, nextRole);
-        if (!result.error) {
-          await logAdminAction(
-            'change_role',
-            'profile',
-            account.id,
-            `${account.email ?? account.id}: ${account.role} to ${nextRole}`
-          );
-        }
-        return result;
-      },
-      `${account.full_name ?? account.email ?? 'Account'} is now a ${nextRole}.`
-    );
-  };
+    setReportLoading(true);
+    setReportError(null);
+    try {
+      const [nextReport, nextAudit] = await Promise.all([
+        getSystemReport(),
+        listAuditLog(50),
+      ]);
+      setReport(nextReport);
+      setAudit(nextAudit);
+    } catch (error) {
+      setReportError(
+        error instanceof Error ? error.message : 'Could not generate the report.'
+      );
+    } finally {
+      setReportLoading(false);
+    }
+  }, [role]);
 
-  const handleToggleActive = (account: AdminUser) => {
-    const nextActive = !account.is_active;
-    void runAction(
-      `active-${account.id}`,
-      async () => {
-        const result = await setUserActive(account.id, nextActive);
-        if (!result.error) {
-          await logAdminAction(
-            nextActive ? 'enable_account' : 'disable_account',
-            'profile',
-            account.id,
-            account.email ?? account.id
-          );
-        }
-        return result;
-      },
-      nextActive ? 'Account re-enabled.' : 'Account disabled.'
-    );
-  };
+  useEffect(() => {
+    if (tab === 'reports') {
+      loadReport();
+    }
+  }, [tab, loadReport]);
 
-  const handleDeleteEvent = (event: AdminEventSummary) => {
+  const handleChangeRole = (target: AdminUser, nextRole: Role) => {
+    if (target.role === nextRole) return;
+    if (nextRole === 'admin') {
+      Alert.alert(
+        'Not allowed',
+        'The administrator account is created in advance. New administrators cannot be created.'
+      );
+      return;
+    }
+    if (target.role === 'admin') {
+      Alert.alert(
+        'Not allowed',
+        'The administrator account cannot be demoted or changed.'
+      );
+      return;
+    }
+
     Alert.alert(
-      'Delete this event?',
-      `"${event.title}" (${event.eventCode}) and every attendance record inside it will be removed.`,
+      'Change user role',
+      `Set ${target.full_name || target.email} as ${ROLE_LABELS[nextRole]}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Confirm',
+          onPress: async () => {
+            setBusyId(target.id);
+            const { error } = await updateUserRole(target.id, nextRole);
+            setBusyId(null);
+
+            if (error) {
+              Alert.alert('Error', error);
+              return;
+            }
+
+            setUsers((prev) =>
+              prev.map((item) =>
+                item.id === target.id ? { ...item, role: nextRole } : item
+              )
+            );
+            void logAdminAction(
+              'user.role_changed',
+              'profile',
+              target.id,
+              `${target.role} -> ${nextRole}`
+            );
+          },
+        },
+      ]
+    );
+  };
+
+  const handleToggleActive = (target: AdminUser) => {
+    if (target.role === 'admin') {
+      Alert.alert(
+        'Not allowed',
+        'The administrator account must remain active.'
+      );
+      return;
+    }
+    if (target.id === user?.id) {
+      Alert.alert('Not allowed', 'You cannot deactivate your own account.');
+      return;
+    }
+
+    const nextActive = !target.is_active;
+    Alert.alert(
+      nextActive ? 'Activate account?' : 'Deactivate account?',
+      nextActive
+        ? `${target.full_name || target.email} will be able to sign in again.`
+        : `${target.full_name || target.email} will be blocked from signing in and recording attendance.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: nextActive ? 'Activate' : 'Deactivate',
+          style: nextActive ? 'default' : 'destructive',
+          onPress: async () => {
+            setBusyId(target.id);
+            const { error } = await setUserActive(target.id, nextActive);
+            setBusyId(null);
+
+            if (error) {
+              Alert.alert('Error', error);
+              return;
+            }
+
+            setUsers((prev) =>
+              prev.map((item) =>
+                item.id === target.id
+                  ? { ...item, is_active: nextActive }
+                  : item
+              )
+            );
+            void logAdminAction(
+              nextActive ? 'user.activated' : 'user.deactivated',
+              'profile',
+              target.id,
+              target.email ?? undefined
+            );
+          },
+        },
+      ]
+    );
+  };
+
+  const handleToggleEvent = async (event: CloudEvent) => {
+    const nextStatus: EventStatus =
+      (event.status ?? 'open') === 'closed' ? 'open' : 'closed';
+
+    setBusyId(event.id);
+    const { error } = await updateEvent(event.id, { status: nextStatus });
+    setBusyId(null);
+
+    if (error) {
+      Alert.alert('Error', error);
+      return;
+    }
+
+    setEvents((prev) =>
+      prev.map((item) =>
+        item.id === event.id ? { ...item, status: nextStatus } : item
+      )
+    );
+    void logAdminAction(
+      'event.status_changed',
+      'event',
+      event.id,
+      `${event.status ?? 'open'} -> ${nextStatus}`
+    );
+  };
+
+  const handleDeleteEvent = (event: CloudEvent) => {
+    Alert.alert(
+      'Delete event?',
+      `"${event.title}" and its attendance records will be permanently removed.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Delete',
           style: 'destructive',
-          onPress: () => {
-            void runAction(
-              `event-${event.eventId}`,
-              async () => {
-                const result = await deleteEvent(event.eventId);
-                if (!result.error) {
-                  await logAdminAction(
-                    'delete_event',
-                    'event',
-                    event.eventId,
-                    `${event.title} (${event.eventCode})`
-                  );
-                }
-                return result;
-              },
-              'Event deleted.'
+          onPress: async () => {
+            setBusyId(event.id);
+            const { error } = await deleteEvent(event.id);
+            setBusyId(null);
+
+            if (error) {
+              Alert.alert('Error', error);
+              return;
+            }
+
+            setEvents((prev) =>
+              prev.filter(
+                (item) =>
+                  item.id !== event.id &&
+                  item.event_code !== event.event_code
+              )
+            );
+            setRecords((prev) =>
+              prev.filter(
+                (item) =>
+                  item.eventId !== event.id &&
+                  item.eventCode !== event.event_code
+              )
+            );
+            void logAdminAction(
+              'event.deleted',
+              'event',
+              event.id,
+              `${event.title} (${event.event_code})`
             );
           },
         },
@@ -206,54 +330,257 @@ export default function AdminScreen() {
     );
   };
 
-  const handleStatusChange = (
-    record: AdminAttendanceRecord,
-    status: 'present' | 'late'
-  ) => {
-    if (record.status === status) return;
-    void runAction(
-      `att-${record.id}`,
-      async () => {
-        const result = await setAttendanceStatus(record.id, status);
-        if (!result.error) {
-          await logAdminAction(
-            'correct_attendance',
-            'attendance',
-            record.id,
-            `${record.student_name}: ${record.status} to ${status}`
-          );
-        }
-        return result;
-      },
-      'Check-in updated.'
+  const handleShowQr = (event: CloudEvent) => {
+    setQrPayload(
+      buildQRPayload({
+        eventId: event.event_code,
+        title: event.title,
+        start: event.start_time ?? undefined,
+        end: event.end_time ?? undefined,
+      })
     );
   };
 
-  const handleDeleteRecord = (record: AdminAttendanceRecord) => {
+  const handleStartCreateEvent = () => {
+    setCreatingEvent(true);
+    setQrPayload(null);
+    setEditingEvent(null);
+    setDraftTitle('');
+    setDraftCode('');
+    setDraftVenue('');
+    setDraftDescription('');
+    setDraftStart(new Date());
+    setDraftEnd(new Date(Date.now() + 60 * 60 * 1000));
+    setPickerTarget(null);
+    setPickerPart('date');
+  };
+
+  const handleStartEditEvent = (event: CloudEvent) => {
+    setCreatingEvent(false);
+    setQrPayload(null);
+    setEditingEvent(event);
+    setDraftTitle(event.title);
+    setDraftCode(event.event_code);
+    setDraftVenue(event.venue ?? '');
+    setDraftDescription(event.description ?? '');
+    setDraftStart(
+      event.start_time ? new Date(event.start_time) : new Date()
+    );
+    setDraftEnd(
+      event.end_time
+        ? new Date(event.end_time)
+        : new Date(Date.now() + 60 * 60 * 1000)
+    );
+    setPickerTarget(null);
+    setPickerPart('date');
+  };
+
+  const handleCancelEventForm = () => {
+    setCreatingEvent(false);
+    setEditingEvent(null);
+    setPickerTarget(null);
+    setPickerPart('date');
+  };
+
+  const handlePickerChange = (
+    event: DateTimePickerEvent,
+    selected?: Date
+  ) => {
+    if (!pickerTarget) return;
+    if (event.type === 'dismissed' || !selected) {
+      setPickerTarget(null);
+      setPickerPart('date');
+      return;
+    }
+
+    const current = pickerTarget === 'start' ? draftStart : draftEnd;
+    const next = new Date(current);
+    next.setFullYear(
+      selected.getFullYear(),
+      selected.getMonth(),
+      selected.getDate()
+    );
+    next.setHours(selected.getHours(), selected.getMinutes(), 0, 0);
+
+    if (pickerTarget === 'start') setDraftStart(next);
+    else setDraftEnd(next);
+
+    if (Platform.OS === 'android' && pickerPart === 'date') {
+      setPickerPart('time');
+    } else {
+      setPickerTarget(null);
+      setPickerPart('date');
+    }
+  };
+
+  const handleSaveEventForm = async () => {
+    if (!creatingEvent && !editingEvent) return;
+
+    if (!draftTitle.trim()) {
+      Alert.alert('Missing title', 'Please enter an event title.');
+      return;
+    }
+
+    if (creatingEvent && !draftCode.trim()) {
+      Alert.alert('Missing event code', 'Please enter an event code.');
+      return;
+    }
+
+    if (draftEnd.getTime() <= draftStart.getTime()) {
+      Alert.alert('Invalid schedule', 'End time must be after start time.');
+      return;
+    }
+
+    const nextTitle = draftTitle.trim();
+    const nextStart = draftStart.toISOString();
+    const nextEnd = draftEnd.toISOString();
+    const nextVenue = draftVenue.trim();
+    const nextDescription = draftDescription.trim();
+
+    if (creatingEvent) {
+      setBusyId('new-event');
+      const { error } = await createEvent({
+        eventId: draftCode.trim(),
+        title: nextTitle,
+        start: nextStart,
+        end: nextEnd,
+        venue: nextVenue,
+        description: nextDescription,
+      });
+      setBusyId(null);
+
+      if (error) {
+        Alert.alert('Error', error);
+        return;
+      }
+
+      void logAdminAction(
+        'event.created',
+        'event',
+        draftCode.trim(),
+        nextTitle
+      );
+      handleCancelEventForm();
+      await loadAll();
+      return;
+    }
+
+    if (!editingEvent) return;
+
+    setBusyId(editingEvent.id);
+
+    const { error } = await updateEvent(editingEvent.id, {
+      title: nextTitle,
+      start_time: nextStart,
+      end_time: nextEnd,
+      venue: nextVenue,
+      description: nextDescription,
+    });
+    setBusyId(null);
+
+    if (error) {
+      Alert.alert('Error', error);
+      return;
+    }
+
+    setEvents((prev) =>
+      prev.map((item) =>
+        item.id === editingEvent.id
+          ? {
+              ...item,
+              title: nextTitle,
+              start_time: nextStart,
+              end_time: nextEnd,
+              venue: nextVenue,
+              description: nextDescription,
+            }
+          : item
+      )
+    );
+    void logAdminAction(
+      'event.updated',
+      'event',
+      editingEvent.id,
+      nextTitle
+    );
+    handleCancelEventForm();
+  };
+
+  const handleAttendanceStatus = async (
+    record: AdminAttendanceRecord,
+    status: AttendanceStatus
+  ) => {
+    if (record.status === status) return;
+
+    setBusyId(record.id);
+    const { error } = await updateAttendanceStatus(record.id, status);
+    setBusyId(null);
+
+    if (error) {
+      Alert.alert('Error', error);
+      return;
+    }
+
+    if (status === 'absent') {
+      setRecords((prev) =>
+        prev.filter(
+          (item) =>
+            !(
+              item.id === record.id ||
+              (item.studentId === record.studentId &&
+                item.eventCode === record.eventCode)
+            )
+        )
+      );
+    } else {
+      setRecords((prev) =>
+        prev.map((item) =>
+          item.id === record.id ? { ...item, status } : item
+        )
+      );
+    }
+    void logAdminAction(
+      'attendance.corrected',
+      'attendance',
+      record.id,
+      `${record.studentName} / ${record.eventCode}: ${record.status} -> ${status}`
+    );
+  };
+
+  const handleDeleteAttendance = (record: AdminAttendanceRecord) => {
     Alert.alert(
-      'Remove this check-in?',
-      `${record.student_name} will count as absent for "${record.event_title}".`,
+      'Delete attendance record?',
+      'This correction cannot be undone.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Remove',
+          text: 'Delete',
           style: 'destructive',
-          onPress: () => {
-            void runAction(
-              `att-${record.id}`,
-              async () => {
-                const result = await deleteAttendanceRecord(record.id);
-                if (!result.error) {
-                  await logAdminAction(
-                    'delete_attendance',
-                    'attendance',
-                    record.id,
-                    `${record.student_name} - ${record.event_title}`
-                  );
-                }
-                return result;
-              },
-              'Check-in removed.'
+          onPress: async () => {
+            setBusyId(record.id);
+            const { error } = await deleteAttendance(record.id);
+            setBusyId(null);
+
+            if (error) {
+              Alert.alert('Error', error);
+              return;
+            }
+
+            setRecords((prev) =>
+              prev.filter(
+                (item) =>
+                  item.id !== record.id &&
+                  !(
+                    item.studentId === record.studentId &&
+                    item.eventCode === record.eventCode
+                  )
+              )
+            );
+            void logAdminAction(
+              'attendance.deleted',
+              'attendance',
+              record.id,
+              `${record.studentName} / ${record.eventCode}`
             );
           },
         },
@@ -261,511 +588,1265 @@ export default function AdminScreen() {
     );
   };
 
-  const openRoster = useCallback(async (eventId: string) => {
-    setRosterEventId(eventId);
-    setRoster([]);
-    try {
-      setRoster(await listEventRoster(eventId));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not load the roster.');
-    }
-  }, []);
-
-  const handleMarkPresent = (entry: AdminRosterEntry) => {
-    const studentId = entry.student_id;
-    const eventId = rosterEventId;
-    if (!studentId || !eventId) return;
-    void runAction(
-      `mark-${entry.id}`,
-      async () => {
-        const result = await markAttendancePresent(eventId, studentId);
-        if (!result.error) {
-          await logAdminAction(
-            'mark_attendance_present',
-            'attendance',
-            studentId,
-            `${entry.student_name} - event ${eventId}`
-          );
-        }
-        return result;
-      },
-      `${entry.student_name} marked present.`
-    );
-  };
-
-  const handleExport = async () => {
+  const handleShareReport = async () => {
     if (!report) return;
+
+    const csv = reportToCsv(report);
+    if (Platform.OS === 'web') {
+      Alert.alert(
+        'CSV report',
+        'CSV sharing is available in the mobile app. Use the report below to review the data.'
+      );
+      return;
+    }
+
     try {
       await Share.share({
-        title: 'Attendance report',
-        message: reportToCsv(report),
+        title: 'QR-ATT attendance report',
+        message: csv,
       });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not export the report.');
+    } catch {
+      Alert.alert('Error', 'Could not share the attendance report.');
     }
   };
 
-  if (roleLoading || loading) {
+  if (roleLoading) {
     return (
-      <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
-        <Header title="Admin" compact />
-        <View style={styles.center}>
-          <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.loadingText}>Loading admin dashboard...</Text>
-        </View>
-      </SafeAreaView>
+      <View style={[styles.container, styles.centerContent]}>
+        <Text style={styles.lockedTitle}>Checking your account...</Text>
+      </View>
     );
   }
 
   if (role !== 'admin') {
     return (
-      <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right', 'bottom']}>
-        <Header title="Admin" compact />
-        <View style={styles.center}>
-          <IconTile name={APP_ICONS.lock} size={64} />
-          <Text style={styles.title}>Admins only</Text>
-          <Text style={styles.subtitle}>You do not have permission to access this section.</Text>
+      <View style={[styles.container, styles.centerContent]}>
+        <View style={styles.stateCard}>
+          <View style={styles.stateIcon}>
+            <Ionicons name="shield-outline" size={44} color={COLORS.primary} />
+          </View>
+          <Text style={styles.lockedTitle}>Admins Only</Text>
+          <Text style={styles.lockedSubtitle}>
+            Administrator accounts can manage users, events, and attendance.
+          </Text>
         </View>
-      </SafeAreaView>
+      </View>
     );
   }
 
-  const totals = report?.totals;
+  const openEvents = events.filter((event) => (event.status ?? 'open') === 'open');
+  const reportMap = new Map<
+    string,
+    { title: string; eventCode: string; count: number }
+  >();
+  for (const record of records) {
+    const existing = reportMap.get(record.eventId);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      reportMap.set(record.eventId, {
+        title: record.eventTitle,
+        eventCode: record.eventCode,
+        count: 1,
+      });
+    }
+  }
+  const eventReport = Array.from(reportMap.values())
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
+
+  const isEventFormBusy = busyId === (editingEvent?.id ?? 'new-event');
+
+  const renderEventForm = (mode: 'create' | 'edit') => (
+    <>
+      <Text style={styles.cardTitle}>
+        {mode === 'create' ? 'Create event' : 'Edit event'}
+      </Text>
+
+      <Text style={styles.editLabel}>Event title</Text>
+      <TextInput
+        style={styles.editInput}
+        value={draftTitle}
+        onChangeText={setDraftTitle}
+        placeholder="Event title"
+        placeholderTextColor={COLORS.textSecondary}
+        editable={!isEventFormBusy}
+      />
+
+      <Text style={styles.editLabel}>Event code</Text>
+      {mode === 'create' ? (
+        <TextInput
+          style={styles.editInput}
+          value={draftCode}
+          onChangeText={setDraftCode}
+          placeholder="e.g. EVT-2026-0002"
+          placeholderTextColor={COLORS.textSecondary}
+          autoCapitalize="characters"
+          editable={!isEventFormBusy}
+        />
+      ) : (
+        <View style={styles.editReadOnly}>
+          <Text style={styles.editReadOnlyText}>{draftCode}</Text>
+        </View>
+      )}
+
+      <Text style={styles.editLabel}>Venue</Text>
+      <TextInput
+        style={styles.editInput}
+        value={draftVenue}
+        onChangeText={setDraftVenue}
+        placeholder="e.g. School Gymnasium"
+        placeholderTextColor={COLORS.textSecondary}
+        editable={!isEventFormBusy}
+      />
+
+      <Text style={styles.editLabel}>Description</Text>
+      <TextInput
+        style={[styles.editInput, styles.editInputMultiline]}
+        value={draftDescription}
+        onChangeText={setDraftDescription}
+        placeholder="Short details about the event"
+        placeholderTextColor={COLORS.textSecondary}
+        multiline
+        editable={!isEventFormBusy}
+      />
+
+      <Text style={styles.editLabel}>Starts</Text>
+      <Pressable
+        style={({ pressed }) => [styles.editDateChip, pressed && PRESSED]}
+        onPress={() => {
+          setPickerTarget('start');
+          setPickerPart('date');
+        }}
+      >
+        <Ionicons name="sunny-outline" size={16} color={COLORS.primary} />
+        <Text style={styles.editDateText}>{formatDateTime(draftStart)}</Text>
+      </Pressable>
+
+      <Text style={styles.editLabel}>Ends</Text>
+      <Pressable
+        style={({ pressed }) => [styles.editDateChip, pressed && PRESSED]}
+        onPress={() => {
+          setPickerTarget('end');
+          setPickerPart('date');
+        }}
+      >
+        <Ionicons name="moon-outline" size={16} color={COLORS.primary} />
+        <Text style={styles.editDateText}>{formatDateTime(draftEnd)}</Text>
+      </Pressable>
+
+      {pickerTarget && (
+        <View style={styles.pickerContainer}>
+          <DateTimePicker
+            value={pickerTarget === 'start' ? draftStart : draftEnd}
+            mode={Platform.OS === 'android' ? pickerPart : 'datetime'}
+            display={Platform.OS === 'android' ? 'default' : 'spinner'}
+            onChange={handlePickerChange}
+          />
+        </View>
+      )}
+
+      <View style={styles.chipsRow}>
+        <ActionChip
+          icon="save-outline"
+          label={isEventFormBusy ? 'Saving...' : 'Save'}
+          onPress={handleSaveEventForm}
+          disabled={isEventFormBusy}
+        />
+        <ActionChip
+          icon="close-outline"
+          label="Cancel"
+          onPress={handleCancelEventForm}
+          disabled={isEventFormBusy}
+        />
+      </View>
+    </>
+  );
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
-      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        <Header title="Admin dashboard" compact />
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={styles.content}
+      showsVerticalScrollIndicator={false}
+    >
+      <Text style={styles.title}>Admin Dashboard</Text>
+      <Text style={styles.subtitle}>
+        Campus-wide users, events, attendance, and reports.
+      </Text>
 
-        {error ? (
-          <View accessibilityRole="alert" style={styles.errorBanner}>
-            <Ionicons name="alert-circle-outline" size={19} color={COLORS.danger} />
-            <Text style={styles.errorText}>{error}</Text>
-            <Pressable accessibilityRole="button" onPress={() => void load()} style={styles.retryBtn}>
-              <Ionicons name={APP_ICONS.retry} size={15} color={COLORS.danger} />
-              <Text style={styles.retryText}>Retry</Text>
+      <View style={styles.tabBar}>
+        {TABS.map((item) => {
+          const active = tab === item.key;
+          return (
+            <Pressable
+              key={item.key}
+              style={({ pressed }) => [
+                styles.tabChip,
+                active && styles.tabChipActive,
+                pressed && PRESSED,
+              ]}
+              onPress={() => setTab(item.key)}
+            >
+              <Ionicons
+                name={item.icon}
+                size={15}
+                color={active ? TINTS.white : COLORS.textPrimary}
+              />
+              <Text
+                style={[styles.tabText, active && styles.tabTextActive]}
+              >
+                {item.label}
+              </Text>
             </Pressable>
-          </View>
-        ) : null}
+          );
+        })}
+      </View>
 
-        {notice ? (
-          <View accessibilityRole="alert" style={styles.noticeBanner}>
-            <Ionicons name="checkmark-circle-outline" size={19} color={COLORS.present} />
-            <Text style={styles.noticeText}>{notice}</Text>
-          </View>
-        ) : null}
+      {loading ? (
+        <ActivityIndicator color={COLORS.primary} style={styles.loader} />
+      ) : (
+        <>
+          {tab === 'overview' && (
+            <>
+              <View style={styles.statsGrid}>
+                <StatCard
+                  icon="people"
+                  label="Users"
+                  value={users.length}
+                />
+                <StatCard
+                  icon="calendar"
+                  label="Events"
+                  value={events.length}
+                />
+                <StatCard
+                  icon="checkmark-done"
+                  label="Attendance"
+                  value={records.length}
+                />
+                <StatCard
+                  icon="lock-open"
+                  label="Open Events"
+                  value={openEvents.length}
+                />
+              </View>
 
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <IconTile name="stats-chart-outline" size={38} />
-            <Text style={styles.cardTitle}>System overview</Text>
-          </View>
-          <View style={styles.statsRow}>
-            <StatBox label="Users" value={totals?.users ?? 0} icon="people-outline" />
-            <StatBox label="Events" value={totals?.events ?? 0} icon={APP_ICONS.calendar} />
-            <StatBox label="Check-ins" value={totals?.checkIns ?? 0} icon={APP_ICONS.history} />
-          </View>
-          <View style={styles.statsRow}>
-            <StatBox label="Students" value={totals?.students ?? 0} icon="school-outline" />
-            <StatBox label="Teachers" value={totals?.teachers ?? 0} icon="briefcase-outline" />
-            <StatBox
-              label="Attendance"
-              value={`${Math.round((totals?.attendanceRate ?? 0) * 100)}%`}
-              icon="trending-up-outline"
-            />
-          </View>
-          <Text style={styles.hint}>
-            {totals?.activeUsers ?? 0} active - {totals?.disabledUsers ?? 0} disabled -{' '}
-            {totals?.openEvents ?? 0} open events
-          </Text>
-        </View>
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Users by role</Text>
+                <ReportRow label="Students" value={countRole(users, 'student')} />
+                <ReportRow label="Teachers" value={countRole(users, 'teacher')} />
+                <ReportRow label="Administrators" value={countRole(users, 'admin')} />
+              </View>
 
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <IconTile name="people-circle-outline" size={38} />
-            <Text style={styles.cardTitle}>Manage users</Text>
-          </View>
-          <Text style={styles.hint}>
-            Promote, demote or disable an account. Every change is written to the audit log.
-          </Text>
-          {users.length === 0 ? (
-            <Text style={styles.emptyText}>No users found.</Text>
-          ) : (
-            users.map((account) => (
-              <View key={account.id} style={styles.userRow}>
-                <View style={styles.userHead}>
-                  <View style={styles.userCopy}>
-                    <Text style={styles.userName}>{account.full_name || '- No name -'}</Text>
-                    <Text style={styles.userEmail}>{account.email}</Text>
-                  </View>
-                  <View style={[styles.rolePill, !account.is_active && styles.rolePillMuted]}>
-                    <Text style={styles.rolePillText}>
-                      {account.is_active ? account.role : 'disabled'}
-                    </Text>
-                  </View>
-                </View>
-                <View style={styles.userActions}>
-                  <View style={styles.roleOptions}>
-                    {ROLES.map((option) => {
-                      const selected = account.role === option;
-                      return (
-                        <Pressable
-                          key={option}
-                          accessibilityRole="button"
-                          accessibilityLabel={`Make ${account.full_name ?? account.email ?? 'account'} a ${option}`}
-                          accessibilityState={{ selected }}
-                          disabled={busyKey === `role-${account.id}`}
-                          onPress={() => handleRoleChange(account, option)}
-                          style={[styles.roleOption, selected && styles.roleOptionActive]}
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Attendance report</Text>
+                {eventReport.length === 0 ? (
+                  <Text style={styles.emptyLine}>
+                    No attendance records yet.
+                  </Text>
+                ) : (
+                  eventReport.map((item) => (
+                    <ReportRow
+                      key={item.eventCode}
+                      label={`${item.title} (${item.eventCode})`}
+                      value={item.count}
+                    />
+                  ))
+                )}
+              </View>
+            </>
+          )}
+
+          {tab === 'users' && (
+            <>
+              {users.length === 0 ? (
+                <EmptyState
+                  icon="people-outline"
+                  text="No user profiles found."
+                />
+              ) : (
+                users.map((item) => {
+                  const isSelf = item.id === user?.id;
+                  return (
+                    <View key={item.id} style={styles.card}>
+                      <View style={styles.rowTop}>
+                        <View style={styles.avatar}>
+                          <Ionicons
+                            name={
+                              item.role === 'admin'
+                                ? 'shield-checkmark'
+                                : item.role === 'teacher'
+                                  ? 'school'
+                                  : 'person'
+                            }
+                            size={18}
+                            color={COLORS.primary}
+                          />
+                        </View>
+                        <View style={styles.rowBody}>
+                          <Text style={styles.rowTitle}>
+                            {item.full_name || 'Unnamed user'}
+                            {isSelf ? ' (you)' : ''}
+                          </Text>
+                          <Text style={styles.rowMeta}>{item.email}</Text>
+                          <Text style={styles.rowMeta}>
+                            Current role: {ROLE_LABELS[item.role]}
+                          </Text>
+                        </View>
+                      </View>
+
+                      {item.role === 'admin' ? (
+                        <View style={styles.chipsRow}>
+                          <View
+                            style={[
+                              styles.statusBadge,
+                              styles.statusOpen,
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.statusText,
+                                styles.statusTextOpen,
+                              ]}
+                            >
+                              Protected administrator
+                            </Text>
+                          </View>
+                        </View>
+                      ) : (
+                        <View style={styles.chipsRow}>
+                          {ROLE_OPTIONS.map((option) => {
+                            const active = item.role === option;
+                            return (
+                              <Pressable
+                                key={option}
+                                style={({ pressed }) => [
+                                  styles.roleChip,
+                                  active && styles.roleChipActive,
+                                  pressed && PRESSED,
+                                ]}
+                                onPress={() => handleChangeRole(item, option)}
+                                disabled={active || busyId === item.id}
+                              >
+                                <Text
+                                  style={[
+                                    styles.roleChipText,
+                                    active && styles.roleChipTextActive,
+                                  ]}
+                                >
+                                  {busyId === item.id
+                                    ? 'Saving...'
+                                    : ROLE_LABELS[option]}
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      )}
+
+                      <View style={styles.chipsRow}>
+                        <View
+                          style={[
+                            styles.statusBadge,
+                            item.is_active
+                              ? styles.statusOpen
+                              : styles.statusClosed,
+                          ]}
                         >
                           <Text
-                            style={[styles.roleOptionText, selected && styles.roleOptionTextActive]}
+                            style={[
+                              styles.statusText,
+                              item.is_active
+                                ? styles.statusTextOpen
+                                : styles.statusTextClosed,
+                            ]}
                           >
-                            {option}
+                            {item.is_active ? 'Active' : 'Disabled'}
                           </Text>
-                        </Pressable>
-                      );
-                    })}
+                        </View>
+                        {item.role !== 'admin' && (
+                          <ActionChip
+                            icon={
+                              item.is_active
+                                ? 'pause-circle-outline'
+                                : 'play-circle-outline'
+                            }
+                            label={
+                              busyId === item.id
+                                ? 'Saving...'
+                                : item.is_active
+                                  ? 'Deactivate'
+                                  : 'Activate'
+                            }
+                            onPress={() => handleToggleActive(item)}
+                            disabled={busyId === item.id || isSelf}
+                            danger={item.is_active}
+                          />
+                        )}
+                      </View>
+                    </View>
+                  );
+                })
+              )}
+            </>
+          )}
+
+          {tab === 'events' && (
+            <>
+              {!creatingEvent && !editingEvent && (
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.createEventButton,
+                    pressed && PRESSED,
+                  ]}
+                  onPress={handleStartCreateEvent}
+                >
+                  <Ionicons
+                    name="add-circle-outline"
+                    size={20}
+                    color={TINTS.white}
+                  />
+                  <Text style={styles.createEventText}>Create Event</Text>
+                </Pressable>
+              )}
+
+              {qrPayload && (
+                <View style={styles.card}>
+                  <Text style={styles.cardTitle}>Event QR code</Text>
+                  <View style={styles.qrBox}>
+                    <QRCode value={qrPayload} size={200} />
                   </View>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={
-                      account.is_active
-                        ? `Disable ${account.email ?? 'account'}`
-                        : `Enable ${account.email ?? 'account'}`
-                    }
-                    disabled={busyKey === `active-${account.id}`}
-                    onPress={() => handleToggleActive(account)}
-                    style={[
-                      styles.actionButton,
-                      account.is_active ? styles.actionDanger : styles.actionSuccess,
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.actionText,
-                        account.is_active ? styles.actionDangerText : styles.actionSuccessText,
-                      ]}
-                    >
-                      {account.is_active ? 'Disable' : 'Enable'}
+                  <Text style={styles.qrPayloadText}>{qrPayload}</Text>
+                  <View style={styles.chipsRow}>
+                    <ActionChip
+                      icon="close-outline"
+                      label="Hide QR"
+                      onPress={() => setQrPayload(null)}
+                    />
+                  </View>
+                </View>
+              )}
+
+              {creatingEvent && (
+                <View style={styles.card}>{renderEventForm('create')}</View>
+              )}
+
+              {events.length === 0 && !creatingEvent ? (
+                <EmptyState
+                  icon="calendar-outline"
+                  text="No events have been created."
+                />
+              ) : (
+                events.map((event) => {
+                  const isOpen = (event.status ?? 'open') === 'open';
+                  const isEditing = editingEvent?.id === event.id;
+
+                  if (isEditing) {
+                    return (
+                      <View key={event.id} style={styles.card}>
+                        {renderEventForm('edit')}
+                      </View>
+                    );
+                  }
+
+                  return (
+                    <View key={event.id} style={styles.card}>
+                      <View style={styles.rowTop}>
+                        <View style={styles.avatar}>
+                          <Ionicons
+                            name="calendar"
+                            size={18}
+                            color={COLORS.primary}
+                          />
+                        </View>
+                        <View style={styles.rowBody}>
+                          <Text style={styles.rowTitle}>{event.title}</Text>
+                          <Text style={styles.rowMeta}>{event.event_code}</Text>
+                          <Text style={styles.rowMeta}>
+                            {formatEventRange(event.start_time, event.end_time)}
+                          </Text>
+                          {event.venue ? (
+                            <Text style={styles.rowMeta}>{event.venue}</Text>
+                          ) : null}
+                          {event.description ? (
+                            <Text style={styles.rowMeta} numberOfLines={2}>
+                              {event.description}
+                            </Text>
+                          ) : null}
+                        </View>
+                        <View
+                          style={[
+                            styles.statusBadge,
+                            isOpen ? styles.statusOpen : styles.statusClosed,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.statusText,
+                              isOpen
+                                ? styles.statusTextOpen
+                                : styles.statusTextClosed,
+                            ]}
+                          >
+                            {isOpen ? 'Open' : 'Closed'}
+                          </Text>
+                        </View>
+                      </View>
+
+                      <View style={styles.chipsRow}>
+                        <ActionChip
+                          icon="qr-code-outline"
+                          label="Show QR"
+                          onPress={() => handleShowQr(event)}
+                        />
+                        <ActionChip
+                          icon="create-outline"
+                          label="Edit"
+                          onPress={() => handleStartEditEvent(event)}
+                          disabled={busyId === event.id}
+                        />
+                        <ActionChip
+                          icon={
+                            isOpen
+                              ? 'lock-closed-outline'
+                              : 'lock-open-outline'
+                          }
+                          label={
+                            busyId === event.id
+                              ? 'Updating...'
+                              : isOpen
+                                ? 'Close event'
+                                : 'Reopen event'
+                          }
+                          onPress={() => handleToggleEvent(event)}
+                          disabled={busyId === event.id}
+                        />
+                        <ActionChip
+                          icon="trash-outline"
+                          label="Delete"
+                          onPress={() => handleDeleteEvent(event)}
+                          disabled={busyId === event.id}
+                          danger
+                        />
+                      </View>
+                    </View>
+                  );
+                })
+              )}
+            </>
+          )}
+
+          {tab === 'attendance' && (
+            <>
+              {records.length === 0 ? (
+                <EmptyState
+                  icon="checkmark-done-outline"
+                  text="No attendance records yet."
+                />
+              ) : (
+                records.map((record) => (
+                  <View key={record.id} style={styles.card}>
+                    <View style={styles.rowTop}>
+                      <View style={styles.avatar}>
+                        <Ionicons
+                          name="person"
+                          size={18}
+                          color={COLORS.primary}
+                        />
+                      </View>
+                      <View style={styles.rowBody}>
+                        <Text style={styles.rowTitle}>
+                          {record.studentName ||
+                            record.studentEmail ||
+                            shortId(record.studentId)}
+                        </Text>
+                        <Text style={styles.rowMeta}>
+                          {record.eventTitle} ({record.eventCode})
+                        </Text>
+                        <Text style={styles.rowMeta}>
+                          {formatDate(record.scannedAt)}
+                        </Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.chipsRow}>
+                      {ATTENDANCE_OPTIONS.map((option) => {
+                        const active = record.status === option;
+                        return (
+                          <Pressable
+                            key={option}
+                            style={({ pressed }) => [
+                              styles.statusChip,
+                              active && {
+                                backgroundColor: STATUS[option].bg,
+                                borderColor: STATUS[option].fg,
+                              },
+                              pressed && PRESSED,
+                            ]}
+                            onPress={() =>
+                              handleAttendanceStatus(record, option)
+                            }
+                            disabled={active || busyId === record.id}
+                          >
+                            <Text
+                              style={[
+                                styles.statusChipText,
+                                active && { color: STATUS[option].fg },
+                              ]}
+                            >
+                              {busyId === record.id
+                                ? 'Saving...'
+                                : option.charAt(0).toUpperCase() +
+                                  option.slice(1)}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                      <ActionChip
+                        icon="trash-outline"
+                        label="Delete"
+                        onPress={() => handleDeleteAttendance(record)}
+                        disabled={busyId === record.id}
+                        danger
+                      />
+                    </View>
+                  </View>
+                ))
+              )}
+            </>
+          )}
+
+          {tab === 'reports' && (
+            <>
+              <View style={styles.chipsRow}>
+                <ActionChip
+                  icon="refresh-outline"
+                  label={reportLoading ? 'Loading...' : 'Refresh report'}
+                  onPress={loadReport}
+                  disabled={reportLoading}
+                />
+                <ActionChip
+                  icon="share-outline"
+                  label="Share CSV"
+                  onPress={handleShareReport}
+                  disabled={!report}
+                />
+              </View>
+
+              {reportLoading && !report ? (
+                <ActivityIndicator
+                  color={COLORS.primary}
+                  style={styles.loader}
+                />
+              ) : reportError ? (
+                <View style={styles.card}>
+                  <Text style={styles.cardTitle}>Report unavailable</Text>
+                  <Text style={styles.emptyLine}>{reportError}</Text>
+                </View>
+              ) : report ? (
+                <>
+                  <View style={styles.statsGrid}>
+                    <StatCard
+                      icon="people"
+                      label="Total users"
+                      value={report.totals.users}
+                    />
+                    <StatCard
+                      icon="checkmark-done"
+                      label="Check-ins"
+                      value={report.totals.checkIns}
+                    />
+                    <StatCard
+                      icon="calendar"
+                      label="Events"
+                      value={report.totals.events}
+                    />
+                    <StatCard
+                      icon="trending-up"
+                      label="Attendance rate"
+                      value={`${Math.round(report.totals.attendanceRate * 100)}%`}
+                    />
+                  </View>
+
+                  <View style={styles.card}>
+                    <Text style={styles.cardTitle}>Attendance breakdown</Text>
+                    <Text style={styles.rowMeta}>
+                      Generated {formatDate(report.generatedAt)}
                     </Text>
-                  </Pressable>
-                </View>
-              </View>
-            ))
-          )}
-        </View>
+                    <ReportRow label="Present" value={report.totals.present} />
+                    <ReportRow label="Late" value={report.totals.late} />
+                    <ReportRow label="Absent" value={report.totals.absent} />
+                    <ReportRow
+                      label="Students checked in"
+                      value={report.totals.uniqueStudents}
+                    />
+                    <ReportRow
+                      label="Active accounts"
+                      value={report.totals.activeUsers}
+                    />
+                    <ReportRow
+                      label="Disabled accounts"
+                      value={report.totals.disabledUsers}
+                    />
+                  </View>
 
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <IconTile name="calendar-outline" size={38} />
-            <Text style={styles.cardTitle}>Manage events</Text>
-          </View>
-          <Text style={styles.hint}>Deleting an event removes its attendance records too.</Text>
-          {events.length === 0 ? (
-            <Text style={styles.emptyText}>No events found.</Text>
-          ) : (
-            events.map((event) => (
-              <View key={event.eventId} style={styles.eventRow}>
-                <View style={styles.eventCopy}>
-                  <Text style={styles.eventTitle}>{event.title}</Text>
-                  <Text style={styles.eventCode}>{event.eventCode}</Text>
-                  {event.startTime ? (
-                    <Text style={styles.eventMeta}>Starts {formatDate(event.startTime)}</Text>
-                  ) : null}
-                  <Text style={styles.eventMeta}>
-                    {event.checkedIn} checked in - {event.expected} expected - {event.absent} absent
-                  </Text>
-                  {event.ownerName ? (
-                    <Text style={styles.eventMeta}>Owned by {event.ownerName}</Text>
-                  ) : null}
-                </View>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Delete ${event.title}`}
-                  disabled={busyKey === `event-${event.eventId}`}
-                  onPress={() => handleDeleteEvent(event)}
-                  style={styles.iconButton}
-                >
-                  <Ionicons name="trash-outline" size={17} color={COLORS.danger} />
-                </Pressable>
-              </View>
-            ))
-          )}
-        </View>
+                  <View style={styles.card}>
+                    <Text style={styles.cardTitle}>Events at a glance</Text>
+                    {report.events.length === 0 ? (
+                      <Text style={styles.emptyLine}>No events yet.</Text>
+                    ) : (
+                      report.events.slice(0, 8).map((event) => (
+                        <ReportRow
+                          key={event.eventId}
+                          label={`${event.title} - ${event.checkedIn}/${
+                            event.expected || event.checkedIn
+                          } checked in`}
+                          value={`${Math.round(event.rate * 100)}%`}
+                        />
+                      ))
+                    )}
+                  </View>
 
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <IconTile name="checkmark-done-outline" size={38} />
-            <Text style={styles.cardTitle}>Attendance records</Text>
-          </View>
-          <Text style={styles.hint}>
-            Correct a status or remove a check-in. Showing {Math.min(records.length, MAX_VISIBLE_ROWS)}{' '}
-            of {records.length} records.
-          </Text>
-          {records.length === 0 ? (
-            <Text style={styles.emptyText}>No attendance records yet.</Text>
-          ) : (
-            records.slice(0, MAX_VISIBLE_ROWS).map((record) => (
-              <View key={record.id} style={styles.attRow}>
-                <View style={styles.attCopy}>
-                  <Text style={styles.attEvent}>{record.student_name}</Text>
-                  <Text style={styles.attMeta}>
-                    {record.event_title} - {formatDate(record.scanned_at)}
-                  </Text>
-                </View>
-                <StatusChip status={record.status} compact />
-                <View style={styles.attActions}>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`Mark ${record.student_name} present`}
-                    disabled={busyKey === `att-${record.id}` || record.status === 'present'}
-                    onPress={() => handleStatusChange(record, 'present')}
-                    style={styles.attAction}
-                  >
-                    <Text style={styles.attActionText}>Present</Text>
-                  </Pressable>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`Mark ${record.student_name} late`}
-                    disabled={busyKey === `att-${record.id}` || record.status === 'late'}
-                    onPress={() => handleStatusChange(record, 'late')}
-                    style={styles.attAction}
-                  >
-                    <Text style={styles.attActionText}>Late</Text>
-                  </Pressable>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`Remove the check-in for ${record.student_name}`}
-                    disabled={busyKey === `att-${record.id}`}
-                    onPress={() => handleDeleteRecord(record)}
-                    style={styles.iconButton}
-                  >
-                    <Ionicons name="trash-outline" size={16} color={COLORS.danger} />
-                  </Pressable>
-                </View>
-              </View>
-            ))
-          )}
-        </View>
+                  <View style={styles.card}>
+                    <Text style={styles.cardTitle}>Top students</Text>
+                    {report.students.length === 0 ? (
+                      <Text style={styles.emptyLine}>
+                        No student attendance data yet.
+                      </Text>
+                    ) : (
+                      report.students.slice(0, 8).map((student) => (
+                        <ReportRow
+                          key={student.studentId}
+                          label={`${student.name} - ${student.total} record${
+                            student.total === 1 ? '' : 's'
+                          }`}
+                          value={`${Math.round(student.rate * 100)}%`}
+                        />
+                      ))
+                    )}
+                  </View>
 
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <IconTile name="person-add-outline" size={38} />
-            <Text style={styles.cardTitle}>Record a missed check-in</Text>
-          </View>
-          <Text style={styles.hint}>
-            Pick an event, then mark the students who were there but were never scanned.
-          </Text>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.chipRow}
-          >
-            {events.map((event) => {
-              const selected = event.eventId === rosterEventId;
-              return (
-                <Pressable
-                  key={event.eventId}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected }}
-                  onPress={() => void openRoster(event.eventId)}
-                  style={[styles.filterChip, selected && styles.filterChipActive]}
-                >
-                  <Text
-                    style={[styles.filterChipText, selected && styles.filterChipTextActive]}
-                    numberOfLines={1}
-                  >
-                    {event.title}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
-          {!rosterEventId ? (
-            <Text style={styles.emptyText}>Choose an event to see who was expected.</Text>
-          ) : roster.length === 0 ? (
-            <Text style={styles.emptyText}>This event has no expected students.</Text>
-          ) : (
-            roster.map((entry) => (
-              <View key={entry.id} style={styles.attRow}>
-                <View style={styles.attCopy}>
-                  <Text style={styles.attEvent}>{entry.student_name}</Text>
-                  <Text style={styles.attMeta}>
-                    {entry.scanned
-                      ? `Checked in - ${entry.status}`
-                      : entry.student_id
-                        ? 'Not checked in'
-                        : 'No linked account'}
-                  </Text>
-                </View>
-                {entry.scanned ? (
-                  <StatusChip status={entry.status ?? 'present'} compact />
-                ) : entry.student_id ? (
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`Mark ${entry.student_name} present`}
-                    disabled={busyKey === `mark-${entry.id}`}
-                    onPress={() => handleMarkPresent(entry)}
-                    style={[styles.actionButton, styles.actionSuccess]}
-                  >
-                    <Text style={[styles.actionText, styles.actionSuccessText]}>Mark present</Text>
-                  </Pressable>
-                ) : null}
-              </View>
-            ))
+                  <View style={styles.card}>
+                    <Text style={styles.cardTitle}>Recent admin activity</Text>
+                    {audit.length === 0 ? (
+                      <Text style={styles.emptyLine}>
+                        No administrator actions recorded yet.
+                      </Text>
+                    ) : (
+                      audit.slice(0, 10).map((entry) => (
+                        <View key={entry.id} style={styles.auditRow}>
+                          <Text style={styles.auditAction}>{entry.action}</Text>
+                          <Text style={styles.rowMeta}>
+                            {entry.actor_email || 'Administrator'} -{' '}
+                            {formatDate(entry.created_at)}
+                          </Text>
+                          {entry.details ? (
+                            <Text style={styles.rowMeta}>{entry.details}</Text>
+                          ) : null}
+                        </View>
+                      ))
+                    )}
+                  </View>
+                </>
+              ) : (
+                <EmptyState
+                  icon="document-text-outline"
+                  text="No report has been generated yet."
+                />
+              )}
+            </>
           )}
-        </View>
-
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <IconTile name="document-text-outline" size={38} />
-            <Text style={styles.cardTitle}>Attendance report</Text>
-          </View>
-          <Text style={styles.hint}>Per-student totals across every event on the system.</Text>
-          {students.length === 0 ? (
-            <Text style={styles.emptyText}>No student records yet.</Text>
-          ) : (
-            students.slice(0, MAX_VISIBLE_ROWS).map((student) => (
-              <View key={student.studentId} style={styles.attRow}>
-                <View style={styles.attCopy}>
-                  <Text style={styles.attEvent}>{student.name}</Text>
-                  <Text style={styles.attMeta}>
-                    {student.present} present - {student.late} late - {student.absent} absent
-                  </Text>
-                </View>
-                <Text style={styles.rateText}>{Math.round(student.rate * 100)}%</Text>
-              </View>
-            ))
-          )}
-          <View style={styles.reportActions}>
-            <AppButton
-              title="Export CSV"
-              icon="download-outline"
-              variant="secondary"
-              onPress={() => void handleExport()}
-            />
-          </View>
-        </View>
-
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <IconTile name="reader-outline" size={38} />
-            <Text style={styles.cardTitle}>Audit log</Text>
-          </View>
-          {audit.length === 0 ? (
-            <Text style={styles.emptyText}>No administrator actions recorded yet.</Text>
-          ) : (
-            audit.map((entry) => (
-              <View key={entry.id} style={styles.auditRow}>
-                <Text style={styles.auditAction}>{entry.action}</Text>
-                <Text style={styles.auditMeta}>
-                  {entry.actor_email ?? 'unknown'} - {formatDate(entry.created_at)}
-                  {entry.details ? ` - ${entry.details}` : ''}
-                </Text>
-              </View>
-            ))
-          )}
-        </View>
-      </ScrollView>
-    </SafeAreaView>
+        </>
+      )}
+    </ScrollView>
   );
 }
 
-function StatBox({
+function StatCard({
+  icon,
   label,
   value,
-  icon,
 }: {
+  icon: keyof typeof Ionicons.glyphMap;
   label: string;
   value: number | string;
-  icon: keyof typeof Ionicons.glyphMap;
 }) {
   return (
-    <View style={styles.statBox}>
-      <Ionicons name={icon} size={18} color={COLORS.primary} />
+    <View style={styles.statCard}>
+      <View style={styles.statIcon}>
+        <Ionicons name={icon} size={18} color={COLORS.primary} />
+      </View>
       <Text style={styles.statValue}>{value}</Text>
       <Text style={styles.statLabel}>{label}</Text>
     </View>
   );
 }
 
-function formatDate(iso: string | null) {
-  if (!iso) return '';
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
+function ReportRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: number | string;
+}) {
+  return (
+    <View style={styles.reportRow}>
+      <Text style={styles.reportLabel} numberOfLines={1}>
+        {label}
+      </Text>
+      <Text style={styles.reportValue}>{value}</Text>
+    </View>
+  );
+}
+
+function EmptyState({
+  icon,
+  text,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  text: string;
+}) {
+  return (
+    <View style={styles.emptyCard}>
+      <Ionicons name={icon} size={32} color={COLORS.primary} />
+      <Text style={styles.emptyText}>{text}</Text>
+    </View>
+  );
+}
+
+function ActionChip({
+  icon,
+  label,
+  onPress,
+  disabled,
+  danger,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <Pressable
+      style={({ pressed }) => [
+        styles.actionChip,
+        danger && styles.actionChipDanger,
+        pressed && PRESSED,
+      ]}
+      onPress={onPress}
+      disabled={disabled}
+    >
+      <Ionicons
+        name={icon}
+        size={16}
+        color={danger ? COLORS.danger : COLORS.primaryInk}
+      />
+      <Text
+        style={[styles.actionText, danger && styles.actionTextDanger]}
+      >
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+function countRole(users: AdminUser[], role: Role) {
+  return users.filter((user) => user.role === role).length;
+}
+
+function shortId(id: string) {
+  return id ? `…${id.slice(-8)}` : 'unknown';
+}
+
+function formatDate(iso: string) {
+  return new Date(iso).toLocaleString();
+}
+
+function formatDateTime(date: Date) {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const month = date.toLocaleString('en-US', { month: 'short' });
+  return `${month} ${pad(date.getDate())}, ${date.getFullYear()} at ${pad(
+    date.getHours()
+  )}:${pad(date.getMinutes())}`;
+}
+
+function formatEventRange(start: string | null, end: string | null) {
+  if (!start && !end) return 'Schedule to be announced';
+
+  const formatter = (value: string) =>
+    new Date(value).toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+
+  if (start && end) return `${formatter(start)} - ${formatter(end)}`;
+  return formatter((start ?? end) as string);
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: COLORS.background },
-  content: { width: '100%', maxWidth: 680, alignSelf: 'center', paddingHorizontal: 24, paddingTop: 12, paddingBottom: 36 },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 30 },
-  loadingText: { marginTop: 12, fontSize: 14, color: COLORS.textSecondary },
-  title: { fontSize: 22, fontWeight: '800', color: COLORS.textPrimary, marginTop: 16 },
-  subtitle: { fontSize: 14, color: COLORS.textSecondary, textAlign: 'center', marginTop: 6 },
-  errorBanner: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.dangerSoft, borderRadius: 14, paddingHorizontal: 13, paddingVertical: 11, marginTop: 16 },
-  errorText: { flex: 1, fontSize: 13, color: COLORS.danger, marginLeft: 9 },
-  retryBtn: { flexDirection: 'row', alignItems: 'center', minHeight: 44, paddingHorizontal: 8 },
-  retryText: { fontSize: 13, fontWeight: '800', color: COLORS.danger, marginLeft: 5 },
-  noticeBanner: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.presentSoft, borderRadius: 14, paddingHorizontal: 13, paddingVertical: 11, marginTop: 16 },
-  noticeText: { flex: 1, fontSize: 13, color: COLORS.present, marginLeft: 9 },
-  card: { backgroundColor: COLORS.card, borderRadius: 20, borderWidth: 1, borderColor: COLORS.border, padding: 16, marginTop: 18 },
-  cardHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 12, gap: 10 },
-  cardTitle: { fontSize: 17, fontWeight: '800', color: COLORS.textPrimary },
-  statsRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 10, marginBottom: 10 },
-  statBox: { flex: 1, backgroundColor: COLORS.surface, borderRadius: 14, borderWidth: 1, borderColor: COLORS.border, padding: 12, alignItems: 'center', justifyContent: 'center' },
-  statValue: { fontSize: 18, fontWeight: '800', color: COLORS.primary, marginTop: 4 },
-  statLabel: { fontSize: 11, color: COLORS.textSecondary, marginTop: 2, textAlign: 'center' },
-  userRow: { paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: COLORS.border },
-  userHead: { flexDirection: 'row', alignItems: 'center' },
-  userCopy: { flex: 1, paddingRight: 10 },
-  userName: { fontSize: 14, fontWeight: '700', color: COLORS.textPrimary },
-  userEmail: { fontSize: 12, color: COLORS.textSecondary, marginTop: 2 },
-  userActions: { flexDirection: 'row', alignItems: 'center', marginTop: 10, gap: 8 },
-  roleOptions: { flexDirection: 'row', flex: 1, gap: 6 },
-  roleOption: { borderRadius: 999, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.surface, paddingHorizontal: 10, paddingVertical: 6 },
-  roleOptionActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
-  roleOptionText: { fontSize: 11, fontWeight: '800', color: COLORS.textSecondary, textTransform: 'capitalize' },
-  roleOptionTextActive: { color: COLORS.textOnPrimary },
-  rolePill: { backgroundColor: COLORS.primaryLight, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 },
-  rolePillMuted: { backgroundColor: COLORS.dangerSoft },
-  rolePillText: { fontSize: 11, fontWeight: '800', color: COLORS.primaryDark, textTransform: 'capitalize' },
-  actionButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', borderRadius: 999, borderWidth: 1, paddingHorizontal: 12, paddingVertical: 7 },
-  actionDanger: { borderColor: 'rgba(239, 68, 68, 0.24)', backgroundColor: COLORS.dangerSoft },
-  actionSuccess: { borderColor: 'rgba(22, 163, 74, 0.24)', backgroundColor: COLORS.presentSoft },
-  actionText: { fontSize: 11, fontWeight: '800' },
-  actionDangerText: { color: COLORS.danger },
-  actionSuccessText: { color: COLORS.present },
-  iconButton: { minWidth: 34, minHeight: 34, alignItems: 'center', justifyContent: 'center', borderRadius: 999, backgroundColor: COLORS.dangerSoft },
-  eventRow: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: COLORS.border },
-  eventCopy: { flex: 1, paddingRight: 8 },
-  eventTitle: { fontSize: 14, fontWeight: '700', color: COLORS.textPrimary },
-  eventCode: { fontSize: 12, fontWeight: '700', color: COLORS.primary, marginTop: 2 },
-  eventMeta: { fontSize: 12, color: COLORS.textSecondary, marginTop: 2 },
-  attRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: COLORS.border, gap: 8 },
-  attCopy: { flex: 1 },
-  attEvent: { fontSize: 14, fontWeight: '700', color: COLORS.textPrimary },
-  attMeta: { fontSize: 12, color: COLORS.textSecondary, marginTop: 2 },
-  attActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  attAction: { borderRadius: 999, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.surface, paddingHorizontal: 9, paddingVertical: 5 },
-  attActionText: { fontSize: 11, fontWeight: '800', color: COLORS.primary },
-  rateText: { fontSize: 13, fontWeight: '800', color: COLORS.primary },
-  chipRow: { paddingVertical: 8, gap: 8 },
-  filterChip: { maxWidth: 200, borderRadius: 999, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.surface, paddingHorizontal: 12, paddingVertical: 7 },
-  filterChipActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
-  filterChipText: { fontSize: 12, fontWeight: '700', color: COLORS.textSecondary },
-  filterChipTextActive: { color: COLORS.textOnPrimary },
-  reportActions: { marginTop: 12, alignItems: 'flex-start' },
-  auditRow: { paddingVertical: 8, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: COLORS.border },
-  auditAction: { fontSize: 13, fontWeight: '800', color: COLORS.textPrimary },
-  auditMeta: { fontSize: 11, color: COLORS.textSecondary, marginTop: 2 },
-  hint: { fontSize: 12, color: COLORS.textSecondary, lineHeight: 18, marginBottom: 8 },
-  emptyText: { fontSize: 13, color: COLORS.textSecondary, marginTop: 6 },
+  container: {
+    flex: 1,
+    backgroundColor: 'transparent',
+  },
+  content: {
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.lg,
+    paddingBottom: SPACING.xxxl,
+  },
+  centerContent: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: SPACING.lg,
+  },
+  title: {
+    ...TEXT.display,
+    color: '#FFFFFF',
+    marginBottom: SPACING.xxs,
+  },
+  subtitle: {
+    ...TEXT.meta,
+    color: ON_GRADIENT,
+    lineHeight: 21,
+    marginBottom: SPACING.lg,
+  },
+  lockedTitle: {
+    ...TEXT.title,
+    textAlign: 'center',
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.xxs,
+  },
+  lockedSubtitle: {
+    ...TEXT.meta,
+    textAlign: 'center',
+    lineHeight: 21,
+  },
+  stateCard: {
+    width: '100%',
+    maxWidth: 420,
+    alignItems: 'center',
+    backgroundColor: GLASS,
+    borderWidth: 1,
+    borderColor: GLASS_BORDER,
+    borderRadius: RADIUS.card,
+    padding: SPACING.xl,
+    ...SHADOWS.card,
+  },
+  stateIcon: {
+    width: 88,
+    height: 88,
+    borderRadius: RADIUS.pill,
+    backgroundColor: TINTS.wash,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: SPACING.md,
+  },
+  tabBar: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginBottom: SPACING.md,
+  },
+  tabChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: GLASS,
+    borderRadius: RADIUS.chip,
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.xs,
+    marginRight: SPACING.xs,
+    marginBottom: SPACING.xs,
+  },
+  tabChipActive: {
+    backgroundColor: COLORS.textPrimary,
+    borderColor: COLORS.textPrimary,
+  },
+  tabText: {
+    ...TEXT.chip,
+    color: COLORS.textPrimary,
+    marginLeft: 5,
+  },
+  tabTextActive: {
+    color: TINTS.white,
+  },
+  loader: {
+    marginVertical: SPACING.xl,
+  },
+  statsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    marginBottom: SPACING.sm,
+  },
+  statCard: {
+    width: '48%',
+    backgroundColor: GLASS,
+    borderWidth: 1,
+    borderColor: GLASS_BORDER,
+    borderRadius: RADIUS.card,
+    padding: SPACING.lg,
+    marginBottom: SPACING.sm,
+    ...SHADOWS.card,
+  },
+  statIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: RADIUS.pill,
+    backgroundColor: TINTS.wash,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: SPACING.xs,
+  },
+  statValue: {
+    ...TEXT.title,
+  },
+  statLabel: {
+    ...TEXT.meta,
+  },
+  card: {
+    backgroundColor: GLASS,
+    borderWidth: 1,
+    borderColor: GLASS_BORDER,
+    borderRadius: RADIUS.card,
+    padding: SPACING.lg,
+    marginBottom: SPACING.md,
+    ...SHADOWS.card,
+  },
+  cardTitle: {
+    ...TEXT.cardTitle,
+    marginBottom: SPACING.sm,
+  },
+  editLabel: {
+    ...TEXT.label,
+    marginBottom: SPACING.xs,
+    marginTop: SPACING.sm,
+  },
+  editInput: {
+    backgroundColor: TINTS.wash,
+    borderRadius: RADIUS.field,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    fontSize: 15,
+    fontWeight: '600',
+    color: COLORS.textPrimary,
+  },
+  editInputMultiline: {
+    minHeight: 72,
+    textAlignVertical: 'top',
+  },
+  editReadOnly: {
+    backgroundColor: TINTS.washDeep,
+    borderRadius: RADIUS.field,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+  },
+  editReadOnlyText: {
+    ...TEXT.body,
+    fontWeight: '600',
+  },
+  qrBox: {
+    alignItems: 'center',
+    backgroundColor: TINTS.white,
+    borderRadius: RADIUS.card,
+    padding: SPACING.lg,
+    marginTop: SPACING.sm,
+  },
+  qrPayloadText: {
+    ...TEXT.hint,
+    color: COLORS.textSecondary,
+    marginTop: SPACING.sm,
+  },
+  editDateChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: TINTS.wash,
+    borderRadius: RADIUS.field,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+  },
+  editDateText: {
+    ...TEXT.body,
+    flex: 1,
+    fontWeight: '600',
+    marginLeft: SPACING.xs,
+  },
+  pickerContainer: {
+    marginTop: SPACING.sm,
+    alignItems: 'center',
+  },
+  reportRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: SPACING.xs,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+  },
+  reportLabel: {
+    ...TEXT.body,
+    flex: 1,
+    paddingRight: SPACING.sm,
+  },
+  reportValue: {
+    ...TEXT.cardTitle,
+    color: COLORS.primaryInk,
+  },
+  auditRow: {
+    paddingVertical: SPACING.sm,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+  },
+  auditAction: {
+    ...TEXT.body,
+    fontWeight: '700',
+  },
+  rowTop: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  avatar: {
+    width: 40,
+    height: 40,
+    borderRadius: RADIUS.pill,
+    backgroundColor: TINTS.wash,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: SPACING.sm,
+  },
+  rowBody: {
+    flex: 1,
+  },
+  rowTitle: {
+    ...TEXT.cardTitle,
+    marginBottom: 2,
+  },
+  rowMeta: {
+    ...TEXT.meta,
+  },
+  createEventButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#050505',
+    borderRadius: RADIUS.pill,
+    paddingVertical: SPACING.md,
+    marginBottom: SPACING.md,
+    ...SHADOWS.card,
+  },
+  createEventText: {
+    ...TEXT.button,
+    color: TINTS.white,
+    marginLeft: SPACING.xs,
+  },
+  chipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: SPACING.md,
+  },
+  roleChip: {
+    backgroundColor: TINTS.wash,
+    borderRadius: RADIUS.chip,
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.xs,
+    marginRight: SPACING.xs,
+    marginBottom: SPACING.xs,
+  },
+  roleChipActive: {
+    backgroundColor: COLORS.textPrimary,
+    borderColor: COLORS.textPrimary,
+  },
+  roleChipText: {
+    ...TEXT.chip,
+    color: COLORS.textPrimary,
+  },
+  roleChipTextActive: {
+    color: TINTS.white,
+  },
+  statusChip: {
+    backgroundColor: TINTS.wash,
+    borderRadius: RADIUS.chip,
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.xs,
+    marginRight: SPACING.xs,
+    marginBottom: SPACING.xs,
+  },
+  statusChipText: {
+    ...TEXT.chip,
+    color: COLORS.textPrimary,
+  },
+  actionChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: TINTS.wash,
+    borderRadius: RADIUS.chip,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.xs,
+    marginRight: SPACING.xs,
+    marginBottom: SPACING.xs,
+  },
+  actionChipDanger: {
+    backgroundColor: STATUS.absent.bg,
+  },
+  actionText: {
+    ...TEXT.chip,
+    color: COLORS.primaryInk,
+    marginLeft: 5,
+  },
+  actionTextDanger: {
+    color: COLORS.danger,
+  },
+  statusBadge: {
+    borderRadius: RADIUS.badge,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 5,
+    marginLeft: SPACING.xs,
+  },
+  statusOpen: {
+    backgroundColor: 'rgba(31, 107, 71, 0.14)',
+  },
+  statusClosed: {
+    backgroundColor: 'rgba(163, 42, 30, 0.12)',
+  },
+  statusText: {
+    ...TEXT.badge,
+  },
+  statusTextOpen: {
+    color: '#1F6B47',
+  },
+  statusTextClosed: {
+    color: '#A32A1E',
+  },
+  emptyCard: {
+    alignItems: 'center',
+    backgroundColor: GLASS,
+    borderWidth: 1,
+    borderColor: GLASS_BORDER,
+    borderRadius: RADIUS.card,
+    padding: SPACING.xl,
+    ...SHADOWS.card,
+  },
+  emptyText: {
+    ...TEXT.meta,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginTop: SPACING.sm,
+  },
+  emptyLine: {
+    ...TEXT.meta,
+  },
 });
+
+
+export default function AdminScreen() {
+  return (
+    <GradientScreen>
+      <AdminScreenInner />
+    </GradientScreen>
+  );
+}

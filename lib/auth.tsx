@@ -62,8 +62,8 @@ export type SignUpProfile = {
 
 /**
  * Creates an account. The requested role travels as signup metadata, but the
- * database clamps it to 'student' or 'teacher' — an administrator can only be
- * promoted later from the admin dashboard, never by signing up.
+ * database clamps it to 'student' or 'teacher'. The single administrator
+ * account is provisioned separately and can never be created by signing up.
  */
 export async function signUp(
   email: string,

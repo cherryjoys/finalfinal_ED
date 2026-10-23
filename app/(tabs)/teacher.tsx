@@ -6,7 +6,6 @@ import { useFocusEffect } from 'expo-router';
 import { useCallback, useState } from 'react';
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
   Platform,
   Pressable,
   ScrollView,
@@ -15,26 +14,27 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import QRCode from 'react-native-qrcode-svg';
 
 import AppButton from '@/components/AppButton';
-import Header from '@/components/Header';
-import IconTile from '@/components/IconTile';
-import { COLORS } from '@/constants/colors';
-import { APP_ICONS } from '@/constants/icons';
+import GradientScreen from '@/components/GradientScreen';
+import { COLORS, TINTS } from '@/constants/colors';
+import { HIT, PRESSED, RADIUS, SHADOWS, SPACING, TEXT } from '@/constants/theme';
+import { useAuth } from '@/lib/auth';
 import {
-  DEFAULT_LATE_AFTER_MINUTES,
   createEvent,
-  normalizeRoster,
   getEventsByTeacher,
   updateEvent,
-  closeEvent,
   type CloudEvent,
+  type EventStatus,
 } from '@/lib/events';
 import { buildQRPayload } from '@/lib/qr';
 import { useRole } from '@/lib/useRole';
-import { supabase } from '@/lib/supabase';
+
+const GLASS = 'rgba(255, 255, 255, 0.72)';
+const GLASS_SOFT = 'rgba(255, 255, 255, 0.38)';
+const GLASS_BORDER = 'rgba(255, 255, 255, 0.65)';
+const ON_GRADIENT = 'rgba(255, 255, 255, 0.82)';
 
 function toLocalISO(date: Date) {
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -52,6 +52,21 @@ function formatDateTime(date: Date) {
   )}:${pad(date.getMinutes())}`;
 }
 
+function formatEventRange(start: string | null, end: string | null) {
+  if (!start && !end) return 'Schedule to be announced';
+
+  const formatter = (value: string) =>
+    new Date(value).toLocaleString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+
+  if (start && end) return `${formatter(start)} - ${formatter(end)}`;
+  return formatter((start ?? end) as string);
+}
+
 const QUICK_END_OPTIONS = [
   { label: '+30 min', ms: 30 * 60 * 1000 },
   { label: '+1 hour', ms: 60 * 60 * 1000 },
@@ -60,43 +75,67 @@ const QUICK_END_OPTIONS = [
 
 type EditTarget = 'start' | 'end';
 
-export default function TeacherScreen() {
+function TeacherScreenInner() {
+  const { user } = useAuth();
   const { role, loading: roleLoading } = useRole();
   const [title, setTitle] = useState('');
   const [eventId, setEventId] = useState('');
+  const [venue, setVenue] = useState('');
+  const [description, setDescription] = useState('');
   const [startDate, setStartDate] = useState(() => new Date());
   const [endDate, setEndDate] = useState(
     () => new Date(Date.now() + 60 * 60 * 1000)
   );
   const [editTarget, setEditTarget] = useState<EditTarget | null>(null);
   const [editingPart, setEditingPart] = useState<'date' | 'time'>('date');
-  const [roster, setRoster] = useState('');
-  const [lateAfter, setLateAfter] = useState(String(DEFAULT_LATE_AFTER_MINUTES));
   const [payload, setPayload] = useState<string | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
-  const [myEvents, setMyEvents] = useState<CloudEvent[]>([]);
-  const [loadingEvents, setLoadingEvents] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [events, setEvents] = useState<CloudEvent[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(true);
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
-  const [editTitle, setEditTitle] = useState('');
-  const [editStart, setEditStart] = useState<Date | null>(null);
-  const [editEnd, setEditEnd] = useState<Date | null>(null);
-  const [savingEdit, setSavingEdit] = useState(false);
-  const [closingId, setClosingId] = useState<string | null>(null);
+  const [busyEventId, setBusyEventId] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
   const isAndroid = Platform.OS === 'android';
-  const rosterNames = normalizeRoster(roster);
-  const lateAfterMinutes = Number.parseInt(lateAfter, 10);
+  const isEditing = editingEventId !== null;
 
-  const clearFeedback = () => {
-    setErrorMessage(null);
-    setSuccessMessage(null);
-    setPayload(null);
+  const loadEvents = useCallback(async () => {
+    if (!user) {
+      setEvents([]);
+      setEventsLoading(false);
+      return;
+    }
+
+    setEventsLoading(true);
+    const list = await getEventsByTeacher(user.id);
+    setEvents(list);
+    setEventsLoading(false);
+  }, [user]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (role !== 'teacher') {
+        setEventsLoading(false);
+        return;
+      }
+      loadEvents();
+    }, [role, loadEvents])
+  );
+
+  const resetForm = () => {
+    setTitle('');
+    setEventId('');
+    setVenue('');
+    setDescription('');
+    setStartDate(new Date());
+    setEndDate(new Date(Date.now() + 60 * 60 * 1000));
+    setEditingEventId(null);
+    setEditTarget(null);
+    setEditingPart('date');
   };
 
   const openPicker = (target: EditTarget) => {
-    clearFeedback();
+    setMessage(null);
     setEditTarget(target);
     setEditingPart('date');
   };
@@ -129,724 +168,755 @@ export default function TeacherScreen() {
   };
 
   const handleQuickEnd = (ms: number) => {
-    clearFeedback();
+    setMessage(null);
     setEndDate(new Date(startDate.getTime() + ms));
   };
 
-  const loadMyEvents = useCallback(async () => {
-    const { data } = await supabase.auth.getUser();
-    const user = data.user;
-    if (!user) return;
-    setLoadingEvents(true);
-    try {
-      const list = await getEventsByTeacher(user.id);
-      setMyEvents(list);
-    } finally {
-      setLoadingEvents(false);
-    }
-  }, []);
-
-  useFocusEffect(
-    useCallback(() => {
-      void loadMyEvents();
-    }, [loadMyEvents])
-  );
-
-  const startEdit = (ev: CloudEvent) => {
-    setEditingEventId(ev.id);
-    setEditTitle(ev.title);
-    setEditStart(ev.start_time ? new Date(ev.start_time) : null);
-    setEditEnd(ev.end_time ? new Date(ev.end_time) : null);
-    clearFeedback();
+  const handleEditEvent = (event: CloudEvent) => {
+    setEditingEventId(event.id);
+    setTitle(event.title);
+    setEventId(event.event_code);
+    setVenue(event.venue ?? '');
+    setDescription(event.description ?? '');
+    setStartDate(
+      event.start_time ? new Date(event.start_time) : new Date()
+    );
+    setEndDate(
+      event.end_time
+        ? new Date(event.end_time)
+        : new Date(Date.now() + 60 * 60 * 1000)
+    );
+    setPayload(null);
+    setMessage(null);
+    setEditTarget(null);
+    setEditingPart('date');
   };
 
-  const cancelEdit = () => {
-    setEditingEventId(null);
-    setEditTitle('');
-    setEditStart(null);
-    setEditEnd(null);
+  const handleCancelEdit = () => {
+    resetForm();
+    setMessage(null);
   };
 
-  const saveEdit = async () => {
-    if (!editingEventId || savingEdit) return;
-    if (!editTitle.trim()) {
-      setErrorMessage('Event title is required.');
-      return;
-    }
-    if (editStart && editEnd && editEnd.getTime() <= editStart.getTime()) {
-      setErrorMessage('End time must be after start time.');
-      return;
-    }
-    setSavingEdit(true);
-    setErrorMessage(null);
-    setSuccessMessage(null);
-    const { error } = await updateEvent(editingEventId, {
-      title: editTitle.trim(),
-      start_time: editStart ? editStart.toISOString() : null,
-      end_time: editEnd ? editEnd.toISOString() : null,
-    });
-    if (error) {
-      setErrorMessage(error);
-    } else {
-      setSuccessMessage('Event updated.');
-      cancelEdit();
-      await loadMyEvents();
-    }
-    setSavingEdit(false);
-  };
-
-  const handleCloseEvent = async (id: string) => {
-    if (closingId) return;
-    setClosingId(id);
-    setErrorMessage(null);
-    setSuccessMessage(null);
-    const { error } = await closeEvent(id);
-    if (error) {
-      setErrorMessage(error);
-    } else {
-      setSuccessMessage('Event closed.');
-      await loadMyEvents();
-    }
-    setClosingId(null);
-  };
-
-  const handleCreateEvent = async () => {
-    if (creating) return;
+  const handleSaveEvent = async () => {
+    if (saving) return;
 
     const event = {
       eventId: eventId.trim(),
       title: title.trim(),
       start: toLocalISO(startDate),
       end: toLocalISO(endDate),
-      lateAfterMinutes: Number.isFinite(lateAfterMinutes)
-        ? lateAfterMinutes
-        : DEFAULT_LATE_AFTER_MINUTES,
-      expectedStudents: rosterNames,
+      venue: venue.trim(),
+      description: description.trim(),
     };
 
-    setErrorMessage(null);
-    setSuccessMessage(null);
-    setPayload(null);
-
     if (!event.eventId || !event.title) {
-      setErrorMessage('Event title and code are required.');
+      setMessage('Event title and code are required.');
       return;
     }
 
     if (endDate.getTime() <= startDate.getTime()) {
-      setErrorMessage('End time must be after start time.');
+      setMessage('End time must be after start time.');
       return;
     }
 
-    setCreating(true);
+    setSaving(true);
+    setMessage(null);
 
-    try {
-      const { error } = await createEvent(event);
+    if (editingEventId) {
+      const { error } = await updateEvent(editingEventId, {
+        title: event.title,
+        start_time: event.start,
+        end_time: event.end,
+        venue: event.venue,
+        description: event.description,
+      });
+
+      setSaving(false);
+
       if (error) {
-        setErrorMessage('Could not save event.');
+        setMessage('Could not save the event. Please try again.');
         return;
       }
 
-      setSuccessMessage('Event saved.');
-      setPayload(buildQRPayload(event));
-    } catch {
-      setErrorMessage('Could not save the event. Please try again.');
-    } finally {
-      setCreating(false);
+      resetForm();
+      setMessage('Event updated.');
+      await loadEvents();
+      return;
     }
+
+    const { error } = await createEvent(event);
+    setSaving(false);
+
+    if (error) {
+      setMessage('Could not save the event. Please try again.');
+      return;
+    }
+
+    resetForm();
+    setMessage('Event saved! Scan the QR with the Scan tab to test it.');
+    setPayload(buildQRPayload(event));
+    await loadEvents();
+  };
+
+  const handleShowQR = (event: CloudEvent) => {
+    setMessage(null);
+    setPayload(
+      buildQRPayload({
+        eventId: event.event_code,
+        title: event.title,
+        start: event.start_time ?? undefined,
+        end: event.end_time ?? undefined,
+      })
+    );
+  };
+
+  const handleToggleStatus = async (event: CloudEvent) => {
+    const nextStatus: EventStatus =
+      (event.status ?? 'open') === 'closed' ? 'open' : 'closed';
+
+    setBusyEventId(event.id);
+    setMessage(null);
+    const { error } = await updateEvent(event.id, { status: nextStatus });
+    setBusyEventId(null);
+
+    if (error) {
+      setMessage('Could not update the event status.');
+      return;
+    }
+
+    setMessage(
+      nextStatus === 'closed'
+        ? `"${event.title}" is now closed.`
+        : `"${event.title}" is open again.`
+    );
+    await loadEvents();
   };
 
   if (roleLoading) {
-    return <TeacherStatus loading title="Checking your account" />;
+    return (
+      <View style={[styles.container, styles.centerContent]}>
+        <Text style={styles.lockedTitle}>Checking your account...</Text>
+      </View>
+    );
   }
 
   if (role !== 'teacher') {
     return (
-      <TeacherStatus
-        icon={APP_ICONS.lock}
-        title="Teachers only"
-      />
+      <View style={[styles.container, styles.centerContent]}>
+        <View style={styles.stateCard}>
+          <View style={styles.stateIcon}>
+            <Ionicons name="lock-closed-outline" size={44} color={COLORS.primary} />
+          </View>
+          <Text style={styles.lockedTitle}>Teachers Only</Text>
+          <Text style={styles.lockedSubtitle}>
+            Only teacher accounts can manage events.
+          </Text>
+        </View>
+      </View>
     );
   }
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
-      <KeyboardAvoidingView
-        style={styles.keyboardView}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={0}
-      >
-        <ScrollView
-          contentContainerStyle={styles.content}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-        >
-        <Header title="New event" compact />
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={styles.content}
+      keyboardShouldPersistTaps="handled"
+    >
+      <Text style={styles.title}>
+        {isEditing ? 'Edit Event' : 'Create Event QR'}
+      </Text>
+      <Text style={styles.subtitle}>
+        {isEditing
+          ? 'Update the event details, then save your changes.'
+          : 'Fill in the event details, then scan the generated QR with the Scan tab.'}
+      </Text>
 
-          <View style={styles.formCard}>
-            <Text style={styles.label}>Event title</Text>
-            <View style={styles.inputShell}>
-              <Ionicons name={APP_ICONS.sparkle} size={20} color={COLORS.textSecondary} />
-              <TextInput
-                accessibilityLabel="Event title"
-                style={styles.input}
-                value={title}
-                onChangeText={(value) => {
-                  setTitle(value);
-                  clearFeedback();
-                }}
-                placeholder="e.g. Founders' Day"
-                placeholderTextColor={COLORS.textSecondary}
-                editable={!creating}
-              />
-            </View>
-
-            <Text style={[styles.label, styles.spacedLabel]}>Event code</Text>
-            <View style={styles.inputShell}>
-              <Ionicons name="key-outline" size={20} color={COLORS.textSecondary} />
-              <TextInput
-                accessibilityLabel="Event code"
-                style={styles.input}
-                value={eventId}
-                onChangeText={(value) => {
-                  setEventId(value);
-                  clearFeedback();
-                }}
-                placeholder="e.g. EVT-2026-0002"
-                placeholderTextColor={COLORS.textSecondary}
-                autoCapitalize="characters"
-                editable={!creating}
-              />
-            </View>
-
-            <Text style={[styles.label, styles.spacedLabel]}>Expected students</Text>
-            <View style={[styles.inputShell, styles.rosterShell]}>
-              <Ionicons
-                name={APP_ICONS.roster}
-                size={20}
-                color={COLORS.textSecondary}
-                style={styles.rosterIcon}
-              />
-              <TextInput
-                accessibilityLabel="Expected students"
-                accessibilityHint="Separate names with commas. Anyone on this list who does not scan is marked absent."
-                style={[styles.input, styles.rosterInput]}
-                value={roster}
-                onChangeText={(value) => {
-                  setRoster(value);
-                  clearFeedback();
-                }}
-                placeholder="e.g. Juan Dela Cruz, Maria Santos"
-                placeholderTextColor={COLORS.textSecondary}
-                multiline
-                editable={!creating}
-              />
-            </View>
-            <Text style={styles.fieldHint}>
-              {rosterNames.length === 0
-                ? 'Optional. Anyone listed here who never scans is marked absent.'
-                : `${rosterNames.length} student${
-                    rosterNames.length === 1 ? '' : 's'
-                  } expected`}
-            </Text>
-
-            <Text style={[styles.label, styles.spacedLabel]}>Late after (minutes)</Text>
-            <View style={styles.inputShell}>
-              <Ionicons name={APP_ICONS.timer} size={20} color={COLORS.textSecondary} />
-              <TextInput
-                accessibilityLabel="Minutes after start before a student counts as late"
-                style={styles.input}
-                value={lateAfter}
-                onChangeText={(value) => {
-                  setLateAfter(value.replace(/[^0-9]/g, '').slice(0, 3));
-                  clearFeedback();
-                }}
-                placeholder={String(DEFAULT_LATE_AFTER_MINUTES)}
-                placeholderTextColor={COLORS.textSecondary}
-                keyboardType="number-pad"
-                editable={!creating}
-              />
-            </View>
-            <Text style={styles.fieldHint}>
-              Scans after this many minutes count as late instead of present.
-            </Text>
-
-            <Text style={[styles.label, styles.spacedLabel]}>Starts</Text>
-
-          <PickerField
-            value={formatDateTime(startDate)}
-            onPress={() => openPicker('start')}
-            disabled={creating}
+      <View style={styles.formCard}>
+        <Text style={styles.label}>Event Title</Text>
+        <View style={styles.inputWrap}>
+          <Ionicons
+            name="text-outline"
+            size={18}
+            color={COLORS.primary}
+            style={styles.inputIcon}
           />
-
-          <Text style={[styles.label, styles.spacedLabel]}>Ends</Text>
-          <PickerField
-            value={formatDateTime(endDate)}
-            onPress={() => openPicker('end')}
-            disabled={creating}
-          />
-          <View style={styles.chipRow}>
-            {QUICK_END_OPTIONS.map((option) => (
-              <Pressable
-                key={option.label}
-                accessibilityRole="button"
-                accessibilityLabel={`Set end time ${option.label}`}
-                disabled={creating}
-                onPress={() => handleQuickEnd(option.ms)}
-                style={({ pressed }) => [styles.chip, pressed && styles.chipPressed]}
-              >
-                <Text style={styles.chipText}>{option.label}</Text>
-              </Pressable>
-            ))}
-          </View>
-
-          {errorMessage ? (
-            <View accessibilityRole="alert" style={styles.errorBanner}>
-              <Ionicons name="alert-circle-outline" size={19} color={COLORS.danger} />
-              <Text style={styles.errorText}>{errorMessage}</Text>
-            </View>
-          ) : null}
-
-          {successMessage ? (
-            <View style={styles.successBanner}>
-              <Ionicons name="checkmark-circle-outline" size={19} color={COLORS.present} />
-              <Text style={styles.successText}>{successMessage}</Text>
-            </View>
-          ) : null}
-
-          <AppButton
-            theme="primary"
-            title="Create event QR"
-            icon={APP_ICONS.add}
-            onPress={handleCreateEvent}
-            loading={creating}
-            disabled={creating}
-            style={styles.submitButton}
-            accessibilityHint="Save the event and generate its attendance QR code"
+          <TextInput
+            style={styles.input}
+            value={title}
+            onChangeText={setTitle}
+            placeholder="e.g. Founders Day Assembly"
+            placeholderTextColor={COLORS.textSecondary}
+            editable={!saving}
           />
         </View>
 
-        {editTarget ? (
-          <View style={styles.pickerContainer}>
-            <DateTimePicker
-              value={editTarget === 'start' ? startDate : endDate}
-              mode={isAndroid ? editingPart : 'datetime'}
-              display={isAndroid ? 'default' : 'spinner'}
-              onChange={onPickerChange}
-            />
-          </View>
-        ) : null}
+        <Text style={styles.label}>Event Code</Text>
+        <View style={[styles.inputWrap, isEditing && styles.inputWrapLocked]}>
+          <Ionicons
+            name="pricetag-outline"
+            size={18}
+            color={COLORS.primary}
+            style={styles.inputIcon}
+          />
+          <TextInput
+            style={styles.input}
+            value={eventId}
+            onChangeText={setEventId}
+            placeholder="e.g. EVT-2026-0002"
+            placeholderTextColor={COLORS.textSecondary}
+            autoCapitalize="characters"
+            editable={!saving && !isEditing}
+          />
+        </View>
+        {isEditing && (
+          <Text style={styles.hint}>
+            Event codes stay fixed so existing QR codes keep working.
+          </Text>
+        )}
 
-        {payload ? (
-          <View style={styles.resultCard}>
-            <View style={styles.resultHeader}>
-              <IconTile name={APP_ICONS.qr} size={36} style={styles.resultHeaderIcon} />
-              <Text style={styles.resultTitle}>QR ready</Text>
-            </View>
-            <View style={styles.qrBox}>
-              <QRCode
-                value={payload}
-                size={200}
-                color={COLORS.qrForeground}
-                backgroundColor={COLORS.qrBackground}
-              />
-            </View>
-             <Text style={styles.resultText}>Share with attendees.</Text>
-            {eventId.trim() ? (
-              <View style={styles.codeBadge}>
-                 <Text style={styles.codeLabel}>Code</Text>
-                <Text style={styles.codeValue}>{eventId.trim()}</Text>
-              </View>
-            ) : null}
-          </View>
-        ) : null}
+        <Text style={styles.label}>Venue</Text>
+        <View style={styles.inputWrap}>
+          <Ionicons
+            name="location-outline"
+            size={18}
+            color={COLORS.primary}
+            style={styles.inputIcon}
+          />
+          <TextInput
+            style={styles.input}
+            value={venue}
+            onChangeText={setVenue}
+            placeholder="e.g. School Gymnasium"
+            placeholderTextColor={COLORS.textSecondary}
+            editable={!saving}
+          />
+        </View>
 
+        <Text style={styles.label}>Description</Text>
+        <View style={[styles.inputWrap, styles.inputWrapMultiline]}>
+          <Ionicons
+            name="document-text-outline"
+            size={18}
+            color={COLORS.primary}
+            style={styles.inputIcon}
+          />
+          <TextInput
+            style={[styles.input, styles.inputMultiline]}
+            value={description}
+            onChangeText={setDescription}
+            placeholder="Short details about the event"
+            placeholderTextColor={COLORS.textSecondary}
+            multiline
+            editable={!saving}
+          />
+        </View>
+
+        <Text style={styles.label}>Starts</Text>
+        <PickerField
+          value={formatDateTime(startDate)}
+          icon="sunny-outline"
+          onPress={() => openPicker('start')}
+        />
+
+        <Text style={styles.label}>Ends</Text>
+        <PickerField
+          value={formatDateTime(endDate)}
+          icon="moon-outline"
+          onPress={() => openPicker('end')}
+        />
+        <View style={styles.chipRow}>
+          {QUICK_END_OPTIONS.map((option) => (
+            <Pressable
+              key={option.label}
+              style={styles.chip}
+              onPress={() => handleQuickEnd(option.ms)}
+              disabled={saving}
+            >
+              <Text style={styles.chipText}>{option.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <Text style={styles.hint}>Tap a chip to set the end time from start.</Text>
+      </View>
+
+      {message && <Text style={styles.message}>{message}</Text>}
+
+      <AppButton
+        theme="primary"
+        title={
+          saving
+            ? 'Saving...'
+            : isEditing
+              ? 'Save Changes'
+              : 'Create Event'
+        }
+        icon={isEditing ? 'save-outline' : 'add-circle-outline'}
+        onPress={handleSaveEvent}
+      />
+
+      {isEditing && (
+        <AppButton
+          title="Cancel Editing"
+          icon="close-circle-outline"
+          onPress={handleCancelEdit}
+        />
+      )}
+
+      {editTarget && (
+        <View style={styles.pickerContainer}>
+          <DateTimePicker
+            value={editTarget === 'start' ? startDate : endDate}
+            mode={isAndroid ? editingPart : 'datetime'}
+            display={isAndroid ? 'default' : 'spinner'}
+            onChange={onPickerChange}
+          />
+        </View>
+      )}
+
+      {payload && (
         <View style={styles.resultCard}>
-          <View style={styles.resultHeader}>
-            <IconTile name={APP_ICONS.calendar} size={36} style={styles.resultHeaderIcon} />
-            <Text style={styles.resultTitle}>My events</Text>
+          <Text style={styles.resultTitle}>
+            Scan this QR code with the Scan tab:
+          </Text>
+          <View style={styles.qrBox}>
+            <QRCode value={payload} size={200} />
           </View>
-
-          {loadingEvents ? (
-            <ActivityIndicator color={COLORS.primary} />
-          ) : myEvents.length === 0 ? (
-            <Text style={styles.resultText}>No events created yet.</Text>
-          ) : (
-            <View>
-              {myEvents.map((ev) => (
-                <View key={ev.id} style={styles.eventItem}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.eventTitle}>{ev.title}</Text>
-                    <Text style={styles.eventCode}>{ev.event_code}</Text>
-                    {ev.start_time ? (
-                      <Text style={styles.fieldHint}>
-                        Starts {new Date(ev.start_time).toLocaleString()}
-                      </Text>
-                    ) : null}
-                    {ev.end_time ? (
-                      <Text style={styles.fieldHint}>
-                        Ends {new Date(ev.end_time).toLocaleString()} (Closed)
-                      </Text>
-                    ) : (
-                      <Text style={styles.fieldHint}>Status: Open</Text>
-                    )}
-                  </View>
-
-                  {editingEventId === ev.id ? (
-                    <View style={{ marginTop: 10 }}>
-                      <TextInput
-                        value={editTitle}
-                        onChangeText={setEditTitle}
-                        placeholder="Event title"
-                        style={[styles.inputShell, { paddingLeft: 12 }]}
-                      />
-                      <View style={{ flexDirection: 'row', marginTop: 8, gap: 8 }}>
-                        <AppButton
-                          compact
-                          title="Save"
-                          icon="checkmark-outline"
-                          onPress={saveEdit}
-                          loading={savingEdit}
-                        />
-                        <AppButton
-                          compact
-                          variant="secondary"
-                          title="Cancel"
-                          icon="close-outline"
-                          onPress={cancelEdit}
-                        />
-                      </View>
-                    </View>
-                  ) : (
-                    <View style={{ flexDirection: 'row', gap: 6, marginTop: 8 }}>
-                      <AppButton compact title="Edit" icon="create-outline" onPress={() => startEdit(ev)} />
-                      {!ev.end_time && (
-                        <AppButton
-                          compact
-                          variant="danger"
-                          title="Close"
-                          icon="lock-closed-outline"
-                          loading={closingId === ev.id}
-                          onPress={() => void handleCloseEvent(ev.id)}
-                        />
-                      )}
-                    </View>
-                  )}
-                </View>
-              ))}
-            </View>
-          )}
+          <Text style={styles.payloadText}>{payload}</Text>
+          <Pressable
+            style={({ pressed }) => [styles.linkButton, pressed && PRESSED]}
+            onPress={() => setPayload(null)}
+          >
+            <Text style={styles.linkButtonText}>Hide QR</Text>
+          </Pressable>
         </View>
-        </ScrollView>
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+      )}
+
+      <View style={styles.listHeader}>
+        <Text style={styles.sectionTitle}>My Events</Text>
+        {!eventsLoading && (
+          <View style={styles.countBadge}>
+            <Text style={styles.countBadgeText}>{events.length}</Text>
+          </View>
+        )}
+      </View>
+
+      {eventsLoading ? (
+        <ActivityIndicator color={COLORS.primary} style={styles.loader} />
+      ) : events.length === 0 ? (
+        <View style={styles.emptyCard}>
+          <Ionicons name="calendar-outline" size={32} color={COLORS.primary} />
+          <Text style={styles.emptyText}>
+            No events yet. Create one above to generate its QR code.
+          </Text>
+        </View>
+      ) : (
+        events.map((event) => {
+          const status = event.status ?? 'open';
+          const isOpen = status === 'open';
+
+          return (
+            <View key={event.id} style={styles.eventCard}>
+              <View style={styles.eventTop}>
+                <View style={styles.eventHeading}>
+                  <Text style={styles.eventTitle}>{event.title}</Text>
+                  <Text style={styles.eventMeta}>{event.event_code}</Text>
+                  {event.venue ? (
+                    <Text style={styles.eventMeta}>{event.venue}</Text>
+                  ) : null}
+                  {event.description ? (
+                    <Text style={styles.eventMeta} numberOfLines={2}>
+                      {event.description}
+                    </Text>
+                  ) : null}
+                </View>
+                <View
+                  style={[
+                    styles.statusBadge,
+                    isOpen ? styles.statusOpen : styles.statusClosed,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.statusText,
+                      isOpen ? styles.statusTextOpen : styles.statusTextClosed,
+                    ]}
+                  >
+                    {isOpen ? 'Open' : 'Closed'}
+                  </Text>
+                </View>
+              </View>
+
+              <Text style={styles.eventMeta}>
+                {formatEventRange(event.start_time, event.end_time)}
+              </Text>
+
+              <View style={styles.actionRow}>
+                <Pressable
+                  style={({ pressed }) => [styles.actionChip, pressed && PRESSED]}
+                  onPress={() => handleEditEvent(event)}
+                >
+                  <Ionicons name="create-outline" size={16} color={COLORS.primaryInk} />
+                  <Text style={styles.actionText}>Edit</Text>
+                </Pressable>
+                <Pressable
+                  style={({ pressed }) => [styles.actionChip, pressed && PRESSED]}
+                  onPress={() => handleShowQR(event)}
+                >
+                  <Ionicons name="qr-code-outline" size={16} color={COLORS.primaryInk} />
+                  <Text style={styles.actionText}>Show QR</Text>
+                </Pressable>
+                <Pressable
+                  style={({ pressed }) => [styles.actionChip, pressed && PRESSED]}
+                  onPress={() => handleToggleStatus(event)}
+                  disabled={busyEventId === event.id}
+                >
+                  <Ionicons
+                    name={isOpen ? 'lock-closed-outline' : 'lock-open-outline'}
+                    size={16}
+                    color={COLORS.primaryInk}
+                  />
+                  <Text style={styles.actionText}>
+                    {busyEventId === event.id
+                      ? 'Updating...'
+                      : isOpen
+                        ? 'Close'
+                        : 'Reopen'}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          );
+        })
+      )}
+    </ScrollView>
   );
 }
 
 type PickerFieldProps = {
   value: string;
+  icon: keyof typeof Ionicons.glyphMap;
   onPress: () => void;
-  disabled?: boolean;
 };
 
-function PickerField({ value, onPress, disabled = false }: PickerFieldProps) {
+function PickerField({ value, icon, onPress }: PickerFieldProps) {
   return (
     <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={`${value}. Change date and time`}
-      accessibilityState={{ disabled }}
-      disabled={disabled}
+      style={({ pressed }) => [styles.pickerField, pressed && styles.pickerFieldPressed]}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.pickerField,
-        pressed && !disabled && styles.pickerFieldPressed,
-        disabled && styles.disabled,
-      ]}
     >
+      <Ionicons name={icon} size={20} color={COLORS.primary} />
       <Text style={styles.pickerValue}>{value}</Text>
-      <Ionicons name={APP_ICONS.calendar} size={18} color={COLORS.textSecondary} />
+      <Ionicons name="calendar-outline" size={18} color={COLORS.textSecondary} />
     </Pressable>
   );
 }
 
-type TeacherStatusProps = {
-  icon?: keyof typeof Ionicons.glyphMap;
-  title: string;
-  loading?: boolean;
-};
-
-function TeacherStatus({ icon, title, loading = false }: TeacherStatusProps) {
-  return (
-    <SafeAreaView style={styles.statusScreen} edges={['top', 'left', 'right', 'bottom']}>
-      <View style={styles.statusContent}>
-        <View style={styles.statusIcon}>
-          {loading ? (
-            <ActivityIndicator size="large" color={COLORS.primary} />
-          ) : (
-            <Ionicons name={icon ?? 'information-circle-outline'} size={38} color={COLORS.primary} />
-          )}
-        </View>
-        <Text style={styles.statusTitle}>{title}</Text>
-      </View>
-    </SafeAreaView>
-  );
-}
-
 const styles = StyleSheet.create({
-  safeArea: {
+  container: {
     flex: 1,
-    backgroundColor: COLORS.background,
-  },
-  keyboardView: {
-    flex: 1,
+    backgroundColor: 'transparent',
   },
   content: {
-    width: '100%',
-    maxWidth: 680,
-    alignSelf: 'center',
-    paddingHorizontal: 24,
-    paddingTop: 12,
-    paddingBottom: 36,
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.lg,
+    paddingBottom: SPACING.xxxl,
+  },
+  centerContent: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: SPACING.lg,
+  },
+  lockedTitle: {
+    ...TEXT.title,
+    textAlign: 'center',
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.xxs,
+  },
+  lockedSubtitle: {
+    ...TEXT.meta,
+    textAlign: 'center',
+    lineHeight: 21,
+  },
+  title: {
+    ...TEXT.display,
+    color: '#FFFFFF',
+    marginBottom: SPACING.xxs,
+  },
+  subtitle: {
+    ...TEXT.meta,
+    color: ON_GRADIENT,
+    lineHeight: 21,
+    marginBottom: SPACING.lg,
   },
   formCard: {
-    backgroundColor: COLORS.card,
-    borderRadius: 22,
+    backgroundColor: GLASS,
     borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: 18,
-    marginTop: 18,
+    borderColor: GLASS_BORDER,
+    borderRadius: RADIUS.card,
+    padding: SPACING.lg,
+    marginBottom: SPACING.lg,
+    ...SHADOWS.card,
   },
   label: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.textPrimary,
-    marginBottom: 8,
+    ...TEXT.label,
+    marginBottom: SPACING.xs,
+    marginTop: SPACING.md,
   },
-  spacedLabel: {
-    marginTop: 17,
-  },
-  fieldHint: {
-    fontSize: 12,
-    lineHeight: 17,
-    color: COLORS.textSecondary,
-    marginTop: 7,
-  },
-  inputShell: {
-    minHeight: 54,
+  inputWrap: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: COLORS.surface,
-    borderRadius: 15,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    paddingLeft: 15,
-    paddingRight: 12,
+    backgroundColor: TINTS.wash,
+    borderRadius: RADIUS.field,
+    paddingHorizontal: SPACING.md,
+    minHeight: HIT.min + 8,
   },
-  rosterShell: {
-    minHeight: 96,
+  inputWrapLocked: {
+    backgroundColor: TINTS.washDeep,
+  },
+  inputWrapMultiline: {
     alignItems: 'flex-start',
-    paddingTop: 15,
-    paddingBottom: 12,
-  },
-  rosterIcon: {
-    marginTop: 2,
-  },
-  rosterInput: {
-    minHeight: 68,
-    textAlignVertical: 'top',
-    paddingTop: 0,
+    paddingTop: SPACING.sm,
   },
   input: {
     flex: 1,
-    minHeight: 52,
-    paddingHorizontal: 12,
-    paddingVertical: 0,
-    fontSize: 15,
+    fontSize: 16,
+    fontWeight: '600',
     color: COLORS.textPrimary,
-    includeFontPadding: false,
+    paddingVertical: SPACING.sm,
+  },
+  inputMultiline: {
+    minHeight: 70,
+    textAlignVertical: 'top',
+  },
+  inputIcon: {
+    marginRight: SPACING.xs,
   },
   pickerField: {
-    minHeight: 56,
-    backgroundColor: COLORS.surface,
-    borderRadius: 15,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    paddingHorizontal: 15,
+    backgroundColor: TINTS.wash,
+    borderRadius: RADIUS.field,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.md,
+    minHeight: HIT.min + 8,
     flexDirection: 'row',
     alignItems: 'center',
   },
   pickerFieldPressed: {
-    backgroundColor: COLORS.primaryLight,
+    backgroundColor: TINTS.washDeep,
+    opacity: 0.9,
   },
   pickerValue: {
     flex: 1,
-    fontSize: 14,
-    fontWeight: '700',
-    color: COLORS.textPrimary,
-    marginHorizontal: 10,
+    ...TEXT.body,
+    fontWeight: '600',
+    marginHorizontal: SPACING.sm,
   },
   chipRow: {
     flexDirection: 'row',
-    marginTop: 9,
+    marginTop: SPACING.sm,
   },
   chip: {
-    minHeight: 44,
+    minHeight: HIT.min,
     justifyContent: 'center',
-    backgroundColor: COLORS.primaryLight,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    marginRight: 7,
-  },
-  chipPressed: {
-    opacity: 0.72,
+    backgroundColor: GLASS,
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+    borderRadius: RADIUS.chip,
+    paddingHorizontal: SPACING.md,
+    marginRight: SPACING.xs,
   },
   chipText: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: COLORS.primaryDark,
+    ...TEXT.chip,
+    color: COLORS.primaryInk,
   },
-  errorBanner: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    backgroundColor: COLORS.dangerSoft,
-    borderRadius: 14,
-    paddingHorizontal: 13,
-    paddingVertical: 11,
-    marginTop: 16,
-  },
-  errorText: {
-    flex: 1,
-    fontSize: 13,
-    lineHeight: 18,
-    color: COLORS.danger,
-    marginLeft: 9,
-  },
-  successBanner: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    backgroundColor: COLORS.successSoft,
-    borderRadius: 14,
-    paddingHorizontal: 13,
-    paddingVertical: 11,
-    marginTop: 16,
-  },
-  successText: {
-    flex: 1,
-    fontSize: 13,
-    lineHeight: 18,
-    color: COLORS.success,
-    marginLeft: 9,
-  },
-  submitButton: {
-    marginTop: 22,
+  hint: {
+    ...TEXT.hint,
+    marginTop: SPACING.xs,
   },
   pickerContainer: {
+    marginTop: SPACING.sm,
     alignItems: 'center',
-    marginTop: 14,
+  },
+  message: {
+    ...TEXT.chip,
+    color: COLORS.primaryInk,
+    textAlign: 'center',
+    marginTop: SPACING.md,
+    marginBottom: SPACING.sm,
+    backgroundColor: TINTS.wash,
+    borderRadius: RADIUS.chip,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    overflow: 'hidden',
   },
   resultCard: {
-    backgroundColor: COLORS.card,
-    borderRadius: 22,
+    backgroundColor: GLASS,
     borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: 18,
-    marginTop: 18,
-  },
-  resultHeader: {
-    flexDirection: 'row',
+    borderColor: GLASS_BORDER,
+    borderRadius: RADIUS.card,
+    padding: SPACING.xl,
+    marginTop: SPACING.lg,
     alignItems: 'center',
-    marginBottom: 16,
-  },
-  resultHeaderIcon: {
-    marginRight: 11,
+    ...SHADOWS.card,
   },
   resultTitle: {
-    fontSize: 19,
-    fontWeight: '800',
-    color: COLORS.textPrimary,
+    ...TEXT.cardTitle,
+    textAlign: 'center',
+    marginBottom: SPACING.md,
   },
   qrBox: {
-    alignSelf: 'center',
-    backgroundColor: COLORS.qrBackground,
-    borderRadius: 18,
-    padding: 15,
+    backgroundColor: TINTS.white,
+    padding: SPACING.lg,
+    borderRadius: RADIUS.tile,
+    marginBottom: SPACING.md,
+    borderWidth: 2,
+    borderColor: TINTS.wash,
   },
-  resultText: {
-    fontSize: 13,
-    lineHeight: 19,
-    color: COLORS.textSecondary,
+  payloadText: {
+    ...TEXT.hint,
     textAlign: 'center',
-    marginTop: 15,
+    lineHeight: 18,
+  },
+  linkButton: {
+    marginTop: SPACING.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.xs,
+  },
+  linkButtonText: {
+    ...TEXT.chip,
+    color: COLORS.primaryInk,
+  },
+  listHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: SPACING.xl,
+    marginBottom: SPACING.sm,
+  },
+  sectionTitle: {
+    ...TEXT.section,
+    flex: 1,
+  },
+  countBadge: {
+    minWidth: 30,
+    paddingHorizontal: SPACING.xs,
+    paddingVertical: 4,
+    borderRadius: RADIUS.badge,
+    backgroundColor: COLORS.primaryInk,
+    alignItems: 'center',
+  },
+  countBadgeText: {
+    ...TEXT.badge,
+    color: TINTS.white,
+  },
+  loader: {
+    marginVertical: SPACING.lg,
+  },
+  emptyCard: {
+    alignItems: 'center',
+    backgroundColor: GLASS,
+    borderWidth: 1,
+    borderColor: GLASS_BORDER,
+    borderRadius: RADIUS.card,
+    padding: SPACING.xl,
+    ...SHADOWS.card,
+  },
+  emptyText: {
+    ...TEXT.meta,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginTop: SPACING.sm,
+  },
+  eventCard: {
+    backgroundColor: GLASS,
+    borderWidth: 1,
+    borderColor: GLASS_BORDER,
+    borderRadius: RADIUS.card,
+    padding: SPACING.lg,
+    marginBottom: SPACING.md,
+    ...SHADOWS.card,
+  },
+  eventTop: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: SPACING.xxs,
+  },
+  eventHeading: {
+    flex: 1,
+    paddingRight: SPACING.sm,
   },
   eventTitle: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: COLORS.textPrimary,
+    ...TEXT.cardTitle,
+    marginBottom: 2,
   },
-  eventCode: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: COLORS.primary,
-    marginTop: 2,
+  eventMeta: {
+    ...TEXT.meta,
   },
-  eventItem: {
-    backgroundColor: COLORS.surface,
-    borderRadius: 16,
+  statusBadge: {
+    borderRadius: RADIUS.badge,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 5,
+  },
+  statusOpen: {
+    backgroundColor: 'rgba(31, 107, 71, 0.14)',
+  },
+  statusClosed: {
+    backgroundColor: 'rgba(163, 42, 30, 0.12)',
+  },
+  statusText: {
+    ...TEXT.badge,
+  },
+  statusTextOpen: {
+    color: '#1F6B47',
+  },
+  statusTextClosed: {
+    color: '#A32A1E',
+  },
+  actionRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: SPACING.md,
+  },
+  actionChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: TINTS.wash,
+    borderRadius: RADIUS.chip,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.xs,
+    marginRight: SPACING.xs,
+    marginBottom: SPACING.xs,
+  },
+  actionText: {
+    ...TEXT.chip,
+    color: COLORS.primaryInk,
+    marginLeft: 5,
+  },
+  stateCard: {
+    width: '100%',
+    maxWidth: 420,
+    alignItems: 'center',
+    backgroundColor: GLASS,
     borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: 12,
-    marginTop: 10,
+    borderColor: GLASS_BORDER,
+    borderRadius: RADIUS.card,
+    padding: SPACING.xl,
+    ...SHADOWS.card,
   },
-  codeBadge: {
-    alignSelf: 'center',
-    alignItems: 'center',
-    backgroundColor: COLORS.surface,
-    borderRadius: 13,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    marginTop: 14,
-  },
-  codeLabel: {
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 0.8,
-    color: COLORS.textSecondary,
-    textTransform: 'uppercase',
-  },
-  codeValue: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: COLORS.primaryDark,
-    marginTop: 3,
-  },
-  statusScreen: {
-    flex: 1,
-    backgroundColor: COLORS.background,
-  },
-  statusContent: {
-    flex: 1,
+  stateIcon: {
+    width: 88,
+    height: 88,
+    borderRadius: RADIUS.pill,
+    backgroundColor: TINTS.wash,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 30,
-  },
-  statusIcon: {
-    width: 82,
-    height: 82,
-    borderRadius: 28,
-    backgroundColor: COLORS.primaryLight,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 20,
-  },
-  statusTitle: {
-    fontSize: 24,
-    lineHeight: 30,
-    fontWeight: '800',
-    color: COLORS.textPrimary,
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  disabled: {
-    opacity: 0.5,
+    marginBottom: SPACING.md,
   },
 });
+
+
+export default function TeacherScreen() {
+  return (
+    <GradientScreen>
+      <TeacherScreenInner />
+    </GradientScreen>
+  );
+}

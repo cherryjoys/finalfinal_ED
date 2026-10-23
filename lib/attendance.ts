@@ -47,6 +47,7 @@ export type TeacherEventAttendance = AttendanceCounts & {
   endTime: string | null;
   lateAfterMinutes: number;
   entries: AttendanceEntry[];
+  attendees: AttendanceEntry[];
 };
 
 export type TeacherEventSummary = AttendanceCounts & {
@@ -55,6 +56,7 @@ export type TeacherEventSummary = AttendanceCounts & {
   title: string;
   startTime: string | null;
   lateAfterMinutes: number;
+  attendeeCount: number;
 };
 
 
@@ -348,6 +350,7 @@ export async function getTeacherEventSummary(
       absentCount: Math.max(0, expected - checkedInCount),
       checkedInCount,
       expectedCount: expected,
+      attendeeCount: checkedInCount,
     };
   });
 }
@@ -435,6 +438,7 @@ function buildEventDetail(
     endTime: event.end_time,
     lateAfterMinutes: event.late_after_minutes ?? DEFAULT_LATE_AFTER_MINUTES,
     entries,
+    attendees: entries,
     ...counts,
   };
 }

@@ -5,11 +5,19 @@ export const DEFAULT_LATE_AFTER_MINUTES = 10;
 
 const MAX_ROSTER_SIZE = 100;
 
+export type EventStatus = 'open' | 'closed';
+
 export type Event = {
   eventId: string; // public event code from the UI (e.g. EVT-2026-0002)
   title: string;
   start: string;
   end: string;
+  /** Optional location shown on the event cards. */
+  venue?: string;
+  /** Optional short description shown on the event cards. */
+  description?: string;
+  /** Whether students may still check in. Defaults to open. */
+  status?: EventStatus;
   /** Late window in minutes. Defaults to DEFAULT_LATE_AFTER_MINUTES. */
   lateAfterMinutes?: number;
   /** Expected students. Roster rows without a scan become ABSENT. */
@@ -25,6 +33,9 @@ export type CloudEvent = {
   late_after_minutes: number;
   created_by: string | null;
   created_at: string;
+  venue?: string | null;
+  description?: string | null;
+  status?: EventStatus;
 };
 
 export type EventPhase = 'upcoming' | 'ongoing' | 'ended' | 'unscheduled';
@@ -68,6 +79,9 @@ export async function createEvent(
         title: event.title,
         start_time: event.start || null,
         end_time: event.end || null,
+        venue: event.venue || null,
+        description: event.description || null,
+        status: event.status ?? 'open',
         late_after_minutes: normalizeLateAfterMinutes(event.lateAfterMinutes),
         created_by: user?.id ?? null,
       },
@@ -282,6 +296,9 @@ export async function updateEvent(
     title?: string;
     start_time?: string | null;
     end_time?: string | null;
+    venue?: string | null;
+    description?: string | null;
+    status?: EventStatus;
     late_after_minutes?: number;
   }
 ): Promise<{ error: string | null }> {

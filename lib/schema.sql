@@ -62,6 +62,16 @@ create table if not exists public.events (
   late_after_minutes integer not null default 10
 );
 
+-- Event details added by the dashboard. Kept in ALTER statements so an
+-- existing database picks them up when this script is re-run.
+alter table public.events add column if not exists venue text;
+alter table public.events add column if not exists description text;
+alter table public.events add column if not exists status text not null default 'open';
+
+alter table public.events drop constraint if exists events_status_check;
+alter table public.events
+  add constraint events_status_check check (status in ('open', 'closed'));
+
 -- ATTENDANCE
 create table if not exists public.attendance (
   id uuid primary key default gen_random_uuid(),
@@ -118,8 +128,9 @@ alter table public.admin_audit_log enable row level security;
 -- Automatically create a profile after a user signs up.
 --
 -- The requested role comes from the signup metadata, which the client
--- controls — so it is CLAMPED here to 'student' or 'teacher'. 'admin' can only
--- be granted later by an existing administrator, never by signing up.
+-- controls, so it is CLAMPED here to 'student' or 'teacher'. The single
+-- administrator account is provisioned separately and can never be created
+-- by signing up.
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
@@ -220,6 +231,42 @@ drop trigger if exists on_profile_privilege_guard on public.profiles;
 create trigger on_profile_privilege_guard
   before update on public.profiles
   for each row execute procedure public.guard_profile_privileges();
+
+-- Only one administrator account may exist. It is provisioned ahead of time
+-- with lib/promote-admin.sql; the app never promotes another user to admin.
+create or replace function public.guard_single_admin()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if new.role <> 'admin' then
+    return new;
+  end if;
+
+  if tg_op = 'UPDATE' and old.role = 'admin' then
+    return new;
+  end if;
+
+  if exists (
+    select 1
+    from public.profiles p
+    where p.role = 'admin'
+      and p.id <> new.id
+  ) then
+    raise exception 'Only one administrator account is allowed.'
+      using errcode = '23505';
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists on_profile_single_admin on public.profiles;
+create trigger on_profile_single_admin
+  before insert or update of role on public.profiles
+  for each row execute procedure public.guard_single_admin();
 
 
 -- ------------------------------------------------------------
@@ -883,7 +930,7 @@ begin
     v_slot := v_parts[3]::integer;
   exception when others then
     return jsonb_build_object('valid', false, 'code', 'invalid');
-  end if;
+  end;
 
   v_signature := v_parts[4];
 

@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import type { ScannedStatus } from './attendance';
+import type { AttendanceStatus, ScannedStatus } from './attendance';
 import { listAllEvents, type CloudEvent } from './events';
 
 /**
@@ -28,7 +28,15 @@ export type AdminAttendanceRecord = {
   event_code: string;
   event_title: string;
   scanned_at: string;
-  status: ScannedStatus;
+  /** Camel-cased aliases used by the admin dashboard. */
+  studentId: string;
+  studentName: string;
+  studentEmail: string | null;
+  eventId: string;
+  eventCode: string;
+  eventTitle: string;
+  scannedAt: string;
+  status: AttendanceStatus;
 };
 
 export type AdminEventSummary = {
@@ -121,6 +129,13 @@ export async function setUserRole(
   userId: string,
   role: AdminRole
 ): Promise<{ error: string | null }> {
+  if (role === 'admin') {
+    return {
+      error:
+        'The single administrator account is created in advance and cannot be granted from the app.',
+    };
+  }
+
   const { error } = await supabase
     .from('profiles')
     .update({ role })
@@ -160,18 +175,33 @@ export async function listSystemAttendance(): Promise<AdminAttendanceRecord[]> {
   if (error || !data) return [];
 
   const rows = data as any[];
-  const names = await loadNames(rows.map((row) => row.student_id));
+  const profiles = await loadProfiles(rows.map((row) => row.student_id));
 
-  return rows.map((row) => ({
-    id: row.id,
-    student_id: row.student_id,
-    student_name: names.get(row.student_id) ?? 'Unknown student',
-    event_id: row.event_id,
-    event_code: row.events?.event_code ?? '',
-    event_title: row.events?.title ?? 'Unknown event',
-    scanned_at: row.scanned_at,
-    status: row.status === 'late' ? 'late' : 'present',
-  }));
+  return rows.map((row) => {
+    const profile = profiles.get(row.student_id);
+    const studentName = profile?.name ?? 'Unknown student';
+    const eventCode = row.events?.event_code ?? '';
+    const eventTitle = row.events?.title ?? 'Unknown event';
+    const status: ScannedStatus = row.status === 'late' ? 'late' : 'present';
+
+    return {
+      id: row.id,
+      student_id: row.student_id,
+      student_name: studentName,
+      event_id: row.event_id,
+      event_code: eventCode,
+      event_title: eventTitle,
+      scanned_at: row.scanned_at,
+      studentId: row.student_id,
+      studentName,
+      studentEmail: profile?.email ?? null,
+      eventId: row.event_id,
+      eventCode,
+      eventTitle,
+      scannedAt: row.scanned_at,
+      status,
+    };
+  });
 }
 
 /**
@@ -188,6 +218,21 @@ export async function setAttendanceStatus(
     .eq('id', recordId);
 
   return { error: error ? describeError(error) : null };
+}
+
+/**
+ * Sets a check-in to any of the three states. The database only stores
+ * present and late, so correcting a record to absent removes the row —
+ * absence is the absence of a corresponding check-in.
+ */
+export async function updateAttendanceStatus(
+  recordId: string,
+  status: AttendanceStatus
+): Promise<{ error: string | null }> {
+  if (status === 'absent') {
+    return deleteAttendanceRecord(recordId);
+  }
+  return setAttendanceStatus(recordId, status);
 }
 
 /** Removes a check-in entirely — the student shows as absent again. */
@@ -537,9 +582,11 @@ async function listAllRoster(): Promise<any[]> {
   return data as any[];
 }
 
-async function loadNames(ids: string[]): Promise<Map<string, string>> {
+type ProfileInfo = { name: string; email: string | null };
+
+async function loadProfiles(ids: string[]): Promise<Map<string, ProfileInfo>> {
   const unique = Array.from(new Set(ids.filter(Boolean)));
-  const map = new Map<string, string>();
+  const map = new Map<string, ProfileInfo>();
   if (unique.length === 0) return map;
 
   const { data } = await supabase
@@ -548,7 +595,10 @@ async function loadNames(ids: string[]): Promise<Map<string, string>> {
     .in('id', unique);
 
   for (const row of (data ?? []) as any[]) {
-    map.set(row.id, row.full_name ?? row.email ?? 'Unknown student');
+    map.set(row.id, {
+      name: row.full_name ?? row.email ?? 'Unknown student',
+      email: row.email ?? null,
+    });
   }
   return map;
 }
@@ -562,3 +612,15 @@ function addToSet(
   set.add(value);
   map.set(key, set);
 }
+
+// ---------------------------------------------------------------------------
+// DASHBOARD ALIASES
+// ---------------------------------------------------------------------------
+
+export {
+  listUsers as getAdminUsers,
+  setUserRole as updateUserRole,
+  listSystemAttendance as getOverallAttendance,
+  deleteAttendanceRecord as deleteAttendance,
+};
+export { listAllEvents as getAllEvents, deleteEvent } from './events';

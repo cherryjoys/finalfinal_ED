@@ -16,6 +16,7 @@ export const COLORS = {
   textPrimary: '#1F1635',
   textSecondary: '#7F7CA3',
   textOnPrimary: '#FFFFFF',
+  primaryInk: '#050505',
 
   // Borders & shadows
   border: '#EEE7FF',
@@ -46,3 +47,16 @@ export const COLORS = {
 } as const;
 
 export type ColorToken = keyof typeof COLORS;
+
+export const TINTS = {
+  white: '#FFFFFF',
+  wash: 'rgba(18, 20, 26, 0.06)',
+  washDeep: 'rgba(18, 20, 26, 0.1)',
+  inkScrim: 'rgba(5, 5, 5, 0.42)',
+} as const;
+
+export const STATUS = {
+  present: { fg: COLORS.present, bg: COLORS.presentSoft },
+  late: { fg: COLORS.late, bg: COLORS.lateSoft },
+  absent: { fg: COLORS.absent, bg: COLORS.absentSoft },
+} as const;

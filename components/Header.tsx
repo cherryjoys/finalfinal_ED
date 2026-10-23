@@ -8,9 +8,15 @@ type Props = {
   title: string;
   compact?: boolean;
   centered?: boolean;
+  icon?: keyof typeof Ionicons.glyphMap;
 };
 
-export default function Header({ title, compact = false, centered = false }: Props) {
+export default function Header({
+  title,
+  compact = false,
+  centered = false,
+  icon = APP_ICONS.qr,
+}: Props) {
   return (
     <View
       style={[
@@ -28,7 +34,7 @@ export default function Header({ title, compact = false, centered = false }: Pro
       >
         <View style={styles.logoInnerGlow} pointerEvents="none" />
         <Ionicons
-          name={APP_ICONS.qr}
+          name={icon}
           size={compact ? 24 : 30}
           color={COLORS.textOnPrimary}
         />

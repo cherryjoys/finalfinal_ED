@@ -1,41 +1,52 @@
-import Ionicons from '@expo/vector-icons/Ionicons';
 import { Tabs } from 'expo-router';
-import { StyleSheet } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Ionicons from '@expo/vector-icons/Ionicons';
+import { StyleSheet, View } from 'react-native';
 
 import { COLORS } from '@/constants/colors';
-import { APP_ICONS } from '@/constants/icons';
+import { RADIUS, TEXT } from '@/constants/theme';
 import { useRole } from '@/lib/useRole';
 
+function TabIcon({
+  focused,
+  icon,
+  activeIcon,
+  color,
+}: {
+  focused: boolean;
+  icon: keyof typeof Ionicons.glyphMap;
+  activeIcon: keyof typeof Ionicons.glyphMap;
+  color: string;
+}) {
+  return (
+    <View style={[styles.iconWrap, focused && styles.iconWrapActive]}>
+      <Ionicons name={focused ? activeIcon : icon} color={focused ? '#FFFFFF' : color} size={22} />
+    </View>
+  );
+}
+
 export default function TabLayout() {
-  const insets = useSafeAreaInsets();
   const { role } = useRole();
-  const isAdmin = role === 'admin';
 
   return (
     <Tabs
       screenOptions={{
-        headerShown: false,
-        tabBarActiveTintColor: COLORS.primary,
+        tabBarActiveTintColor: COLORS.primaryInk,
         tabBarInactiveTintColor: COLORS.textSecondary,
+        headerShown: false,
         tabBarLabelStyle: styles.tabLabel,
-        tabBarHideOnKeyboard: true,
-        tabBarStyle: [
-          styles.tabBar,
-          { height: 49 + insets.bottom, paddingBottom: insets.bottom },
-        ],
+        tabBarStyle: styles.tabBar,
       }}
     >
       <Tabs.Screen
         name="index"
         options={{
           title: 'Home',
-          tabBarAccessibilityLabel: 'Home',
           tabBarIcon: ({ color, focused }) => (
-            <Ionicons
-              name={focused ? 'home-sharp' : APP_ICONS.home}
+            <TabIcon
+              focused={focused}
+              icon="home-outline"
+              activeIcon="home-sharp"
               color={color}
-              size={23}
             />
           ),
         }}
@@ -43,13 +54,14 @@ export default function TabLayout() {
       <Tabs.Screen
         name="scan"
         options={{
+          href: role === 'admin' ? null : undefined,
           title: 'Scan',
-          tabBarAccessibilityLabel: 'Scan attendance',
           tabBarIcon: ({ color, focused }) => (
-            <Ionicons
-              name={focused ? 'qr-code' : APP_ICONS.qr}
+            <TabIcon
+              focused={focused}
+              icon="qr-code-outline"
+              activeIcon="qr-code"
               color={color}
-              size={24}
             />
           ),
         }}
@@ -57,57 +69,59 @@ export default function TabLayout() {
       <Tabs.Screen
         name="history"
         options={{
+          href: role === 'admin' ? null : undefined,
           title: 'History',
-          tabBarAccessibilityLabel: 'Attendance history',
           tabBarIcon: ({ color, focused }) => (
-            <Ionicons
-              name={focused ? 'clipboard' : APP_ICONS.history}
+            <TabIcon
+              focused={focused}
+              icon="time-outline"
+              activeIcon="time"
               color={color}
-              size={22}
             />
           ),
         }}
       />
-      <Tabs.Screen
-        name="teacher"
-        options={{
-          title: 'Teacher',
-          tabBarAccessibilityLabel: 'Teacher tools',
-          tabBarIcon: ({ color, focused }) => (
-            <Ionicons
-              name={focused ? 'school' : 'school-outline'}
-              color={color}
-              size={23}
-            />
-          ),
-        }}
-      />
-      {isAdmin && (
-        <Tabs.Screen
-          name="admin"
-          options={{
-            title: 'Admin',
-            tabBarAccessibilityLabel: 'Admin dashboard',
-            tabBarIcon: ({ color, focused }) => (
-              <Ionicons
-                name={focused ? 'shield' : 'shield-outline'}
-                color={color}
-                size={22}
-              />
-            ),
-          }}
-        />
-      )}
       <Tabs.Screen
         name="profile"
         options={{
           title: 'Profile',
-          tabBarAccessibilityLabel: 'Profile',
           tabBarIcon: ({ color, focused }) => (
-            <Ionicons
-              name={focused ? 'person' : APP_ICONS.user}
+            <TabIcon
+              focused={focused}
+              icon="person-outline"
+              activeIcon="person"
               color={color}
-              size={23}
+            />
+          ),
+        }}
+      />
+
+      <Tabs.Screen
+        name="teacher"
+        options={{
+          href: role === 'admin' ? null : undefined,
+          title: 'Teacher',
+          tabBarIcon: ({ color, focused }) => (
+            <TabIcon
+              focused={focused}
+              icon="school-outline"
+              activeIcon="school"
+              color={color}
+            />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="admin"
+        options={{
+          href: role === 'admin' ? undefined : null,
+          title: 'Admin',
+          tabBarIcon: ({ color, focused }) => (
+            <TabIcon
+              focused={focused}
+              icon="shield-outline"
+              activeIcon="shield"
+              color={color}
             />
           ),
         }}
@@ -118,13 +132,31 @@ export default function TabLayout() {
 
 const styles = StyleSheet.create({
   tabBar: {
-    backgroundColor: COLORS.card,
-    borderTopColor: COLORS.border,
-    borderTopWidth: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(255, 255, 255, 0.94)',
+    borderTopWidth: 0,
+    borderTopLeftRadius: RADIUS.sheet,
+    borderTopRightRadius: RADIUS.sheet,
+    paddingTop: 6,
+    shadowColor: COLORS.shadow,
+    shadowOffset: { width: 0, height: -6 },
+    shadowOpacity: 0.1,
+    shadowRadius: 16,
+    elevation: 12,
   },
   tabLabel: {
+    ...TEXT.chip,
     fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 0.1,
+    lineHeight: 13,
+    marginTop: 1,
+  },
+  iconWrap: {
+    width: 44,
+    height: 26,
+    borderRadius: RADIUS.pill,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  iconWrapActive: {
+    backgroundColor: '#050505',
   },
 });
